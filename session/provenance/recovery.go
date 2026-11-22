@@ -189,6 +189,7 @@ type LocalRecoveryReprover interface {
 }
 type RecoveryService interface {
 	EvaluateTransaction(context.Context, any, []ProofSidecar) (Result, error)
+	SubmitSourceProof(context.Context, any, []ProofSidecar) (Result, error)
 	GetTracking(context.Context, string) (Result, error)
 	SubmitProof(context.Context, map[string]any, ProofBundle, string) (Result, error)
 	GetProofJob(context.Context, string) (Result, error)
@@ -384,6 +385,25 @@ func (c *RecoveryCoordinator) Resume(ctx context.Context, id string, reprove boo
 	if _, e = Uint(fact.ChainGeneration, 64); e != nil {
 		return r, e
 	}
+	if fact.Status == "confirmed" {
+		if fact.TransactionHash == "" || len(fact.Locator) == 0 {
+			return r, errors.New("missing authenticated mined locator")
+		}
+		for k := range fact.Locator {
+			if k != "blockHash" && k != "txHash" && k != "operationIndex" {
+				return r, errors.New("invalid authenticated locator")
+			}
+		}
+		if _, e := decodeFixed(fact.TransactionHash, 32); e != nil {
+			return r, e
+		}
+		if _, e := decodeFixed(fact.Locator["blockHash"], 32); e != nil {
+			return r, e
+		}
+		if fact.Locator["txHash"] != fact.TransactionHash || !equalNumber(fact.Locator["operationIndex"], r.Intent.OperationIndex) {
+			return r, errors.New("invalid authenticated locator")
+		}
+	}
 	previous := r.Revision
 	if r.ChainGeneration != fact.ChainGeneration || fact.Status == "reorged" || !equalNumber(fact.ChainGeneration, c.Trust.ChainGeneration) || r.State == "needs_reproof" || (reprove && r.State == "proof_rejected") {
 		r.State = "needs_reproof"
@@ -412,7 +432,9 @@ func (c *RecoveryCoordinator) Resume(ctx context.Context, id string, reprove boo
 		}
 		r.State = "pending"
 		if r.DeliveryMode == "tracked" {
-			evaluated, e := c.Service.EvaluateTransaction(ctx, r.Intent.Calldata, []ProofSidecar{recoveryClone(r).Sidecar})
+			// The payment is confirmed; deliver replacement evidence without
+			// reapplying the original transaction deadline as a broadcast check.
+			evaluated, e := c.Service.SubmitSourceProof(ctx, r.Intent.Calldata, []ProofSidecar{recoveryClone(r).Sidecar})
 			if e != nil {
 				return r, e
 			}
@@ -420,27 +442,22 @@ func (c *RecoveryCoordinator) Resume(ctx context.Context, id string, reprove boo
 			if e != nil {
 				return r, e
 			}
+			if tracking.Matched != nil && (tracking.Matched.TxHash != fact.TransactionHash || tracking.Matched.BlockHash != fact.Locator["blockHash"] || tracking.Matched.OperationIndex != fact.Locator["operationIndex"]) {
+				return r, errors.New("tracking acknowledgment matched another transaction")
+			}
 			r.TrackingID = tracking.ID
+			r.TransactionHash = fact.TransactionHash
+			r.Locator = fact.Locator
+			// Persist the accepted delivery before fallible polling so a
+			// restart reuses this proof and tracker without another submission.
+			r, e = c.save(ctx, r, previous)
+			if e != nil {
+				return r, e
+			}
+			previous = r.Revision
 		}
 	}
 	if fact.Status == "confirmed" {
-		if fact.TransactionHash == "" || len(fact.Locator) == 0 {
-			return r, errors.New("missing authenticated mined locator")
-		}
-		for k := range fact.Locator {
-			if k != "blockHash" && k != "txHash" && k != "operationIndex" {
-				return r, errors.New("invalid authenticated locator")
-			}
-		}
-		if _, e := decodeFixed(fact.TransactionHash, 32); e != nil {
-			return r, e
-		}
-		if _, e := decodeFixed(fact.Locator["blockHash"], 32); e != nil {
-			return r, e
-		}
-		if fact.Locator["txHash"] != fact.TransactionHash || !equalNumber(fact.Locator["operationIndex"], r.Intent.OperationIndex) {
-			return r, errors.New("invalid authenticated locator")
-		}
 		r.TransactionHash = fact.TransactionHash
 		r.Locator = fact.Locator
 	}

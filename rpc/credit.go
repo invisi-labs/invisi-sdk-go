@@ -109,7 +109,7 @@ func (c *ProtocolRpcClient) queryBlock(ctx context.Context, scope DeploymentCont
 }
 func (c *ProtocolRpcClient) GetCreditStatus(ctx context.Context, scope DeploymentContext, owner, token common.Address, grantID *big.Int, block CanonicalBlock) (IndexedCreditStatus, error) {
 	var out IndexedCreditStatus
-	if owner == (common.Address{}) || token == (common.Address{}) || grantID == nil || grantID.Sign() <= 0 || grantID.BitLen() > 128 {
+	if owner == (common.Address{}) || grantID == nil || grantID.Sign() <= 0 || grantID.BitLen() > 128 {
 		return out, errors.New("invalid grant identity")
 	}
 	id := new(big.Int).Set(grantID)

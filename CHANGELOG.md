@@ -6,6 +6,8 @@ This release includes the complete eight-module cohort: root SDK, primitives, pr
 
 ### Core and Credit compatibility
 
+- Allow indexed `GetCreditStatus` reads for the zero-token fee-free pre-revocation namespace while retaining owner, positive uint128 ID, scope and canonical-block validation.
+
 - Replace Credit allocation shard/slot and revocation bitmaps with positive uint128 grant IDs, scoped by chain, Core, owner and token. `GrantID` is a `*big.Int`; JSON/RPC uses canonical decimal strings. Creation accepts an explicit ID or generates one cryptographically before encryption/proving, then preserves it through quotations, retries, initial-payment construction and recovery.
 - Add canonical `GetCreditStatus`/contract status reads: 0 unknown, 1 active, 2 permanently disabled. Create requires unknown; draw/update require active; revoke accepts unknown or active without needing private grant state. Managed inventory keeps unknown grants visible but unselectable, preserves later anchored observations during historical replay, and retains permanent disables across successor commitments.
 - Synchronize Credit commitments, EIP-712 authorization, calldata, receipts, RPC types, proving witnesses, session records, IPP terms and shared vectors with the grant-ID Core. Credit envelopes now use `0x84` (minimum 491 bytes); older Credit envelope/state models are rejected. Current Credit proving metadata is manifest 8 / format 9; Note manifest 4 / format 7 and aggregate format 10 retain their separate identities.
@@ -22,6 +24,8 @@ This release includes the complete eight-module cohort: root SDK, primitives, pr
 - Document frozen-request recovery: persist the literal submission body and returned ID, restore quote context only after trusted verification, and reconcile uncertain sends before creating another payment. An expired frozen quote requires the documented exact-body recovery path rather than bypassing SDK expiry checks.
 
 ### Proving resources and Provenance
+
+- Deliver locally replaced Source evidence for authenticated confirmed tracked recovery through `SubmitSourceProof`, allowing historical recovery after the original native deadline. Persist the validated replacement proof and tracker before polling so an outage resumes the same accepted delivery. Initial preparation still uses preflight; pending/reorged facts cannot deliver historical evidence, and custom recovery services must expose the historical submission method.
 
 - Load recursive verification-key fields lazily from authenticated binary resources instead of embedding all field arrays. Native aggregation inherits local directory, mirror, cache and offline policy; dedicated routes load the required capacity, mixed routes C1–C5. Custom backends can provide `VerificationKeyLoader` or an explicit `AggregatorOptions` fallback. Canonical field checks, SHA256, Poseidon2 commitment and member/outer proof verification remain enforced.
 - Pin current Core resources to `85a5d1dffe40fc965ab4345a28b632f463c3ad861c44d5845850fbc7447fd8f6` from Core `4940be21de91689b59ba1a2fe46945f767c3a34c`. Retain independent Provenance pin `8d5a3e60e3e5cbe315150511207d7aff67f4e2924148d396b67d82017ecd1f1c` from Periphery `33ba458ea11e07da282c21b8a2b091a0be1ebd01`. Objects load from immutable `/prover/sets/<index>/` catalogs. The split Core/Provenance loader is retained from the preceding release: each capability loads only its own catalog and shares authenticated content-addressed cache policy.
