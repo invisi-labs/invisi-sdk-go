@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Validate managed wallet and chain/Core deployment scope before restoring Credit operations. Rejected recovery leaves the journal, worker lease and input reservations unchanged; valid recovery retains reservations until explicitly released.
+
 ## 1.3.3
 
 This release includes the complete eight-module cohort: root SDK, primitives, protocol, prover, rpc, session, ipp and paymentrouter. Upgrade their requirements together to `v1.3.3`.

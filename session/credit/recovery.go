@@ -29,6 +29,9 @@ func (s *Session) Resume(ctx context.Context, id string, backend prover.Prover) 
 	if record.Status == "confirmed" || record.Status == "reverted" || record.Status == "failed" {
 		return nil, fmt.Errorf("Credit operation is terminal")
 	}
+	if err := s.validateIntentScope(record.Intent); err != nil {
+		return nil, err
+	}
 	prepared, err := credit.Restore(ctx, record.Intent, record.Proof, backend)
 	if err != nil {
 		return nil, err

@@ -134,6 +134,35 @@ type Operation struct {
 	prepared                    *credit.Prepared
 }
 
+func (s *Session) validateIntentScope(intent credit.Intent) error {
+	if s.context != nil && intent.Context.ProtocolContext != *s.context {
+		return fmt.Errorf("Credit intent deployment differs from managed wallet")
+	}
+	if s.owner != (common.Address{}) {
+		switch {
+		case intent.Create != nil:
+			if intent.Create.Owner != s.owner {
+				return fmt.Errorf("Credit owner differs from managed wallet")
+			}
+		case intent.Update != nil:
+			if intent.Update.Owner != s.owner {
+				return fmt.Errorf("Credit owner differs from managed wallet")
+			}
+		case intent.Revoke != nil:
+			if intent.Revoke.Owner != s.owner {
+				return fmt.Errorf("Credit owner differs from managed wallet")
+			}
+		case intent.Draw != nil:
+			for _, input := range intent.Inputs {
+				if common.BigToAddress(primitives.ElementToBigInt(input.State.SpenderWalletIdentity)) != s.owner {
+					return fmt.Errorf("Credit spender differs from managed wallet")
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Session) Prepare(ctx context.Context, id string, prepared *credit.Prepared) (*Operation, error) {
 	if id == "" || prepared == nil {
 		return nil, fmt.Errorf("Credit operation ID and preparation required")
@@ -142,30 +171,8 @@ func (s *Session) Prepare(ctx context.Context, id string, prepared *credit.Prepa
 	if err != nil {
 		return nil, err
 	}
-	if s.context != nil && intent.Context.ProtocolContext != *s.context {
-		return nil, fmt.Errorf("Credit intent deployment differs from managed wallet")
-	}
-	if s.owner != (common.Address{}) {
-		switch {
-		case intent.Create != nil:
-			if intent.Create.Owner != s.owner {
-				return nil, fmt.Errorf("Credit owner differs from managed wallet")
-			}
-		case intent.Update != nil:
-			if intent.Update.Owner != s.owner {
-				return nil, fmt.Errorf("Credit owner differs from managed wallet")
-			}
-		case intent.Revoke != nil:
-			if intent.Revoke.Owner != s.owner {
-				return nil, fmt.Errorf("Credit owner differs from managed wallet")
-			}
-		case intent.Draw != nil:
-			for _, input := range intent.Inputs {
-				if common.BigToAddress(primitives.ElementToBigInt(input.State.SpenderWalletIdentity)) != s.owner {
-					return nil, fmt.Errorf("Credit spender differs from managed wallet")
-				}
-			}
-		}
+	if err := s.validateIntentScope(intent); err != nil {
+		return nil, err
 	}
 	var evidence *PreparationEvidence
 	if s.prepare != nil {
