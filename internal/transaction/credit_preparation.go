@@ -42,7 +42,7 @@ type ExplicitRevokeCreditPreparation struct {
 	credit.RevokePreparation
 }
 
-func (i *Invisi) creditBuilder(ctx context.Context, identity TransactionIdentity, inputs []CreditInput) (credit.PreparationBuilder, error) {
+func (i *Invisi) creditBuilder(ctx context.Context, identity TransactionIdentity, inputs []CreditInput, revocation *credit.RevokePreparation) (credit.PreparationBuilder, error) {
 	inputs, err := Frozen(inputs)
 	if err != nil {
 		return credit.PreparationBuilder{}, err
@@ -78,7 +78,19 @@ func (i *Invisi) creditBuilder(ctx context.Context, identity TransactionIdentity
 		Owner:   identity.Wallet.GetAddress,
 		Resolve: r.ResolveRecipient,
 		Frame: func(ctx context.Context, token common.Address, deadline uint64) (credit.Context, uint64, error) {
-			c, b, d, err := r.Frame(ctx, token, deadline)
+			var c protocol.TransactionContext
+			var b protocolrpc.CanonicalBlock
+			var d uint64
+			var err error
+			if revocation != nil {
+				var fee *big.Int
+				if revocation.Fee != nil {
+					fee = revocation.Fee.Amount
+				}
+				c, b, d, err = r.RevocationFrame(ctx, token, deadline, fee)
+			} else {
+				c, b, d, err = r.Frame(ctx, token, deadline)
+			}
 			if err != nil {
 				return credit.Context{}, 0, err
 			}
@@ -170,7 +182,7 @@ func (i *Invisi) creditBuilder(ctx context.Context, identity TransactionIdentity
 func (i *Invisi) PrepareCreateCredit(ctx context.Context, p ExplicitCreateCreditPreparation) (result *credit.Prepared, failure error) {
 	defer func() { failure = WrapPreparation("prepareCreateCredit", failure) }()
 	p.CreatePreparation = p.CreatePreparation.Clone()
-	b, err := i.creditBuilder(ctx, p.TransactionIdentity, nil)
+	b, err := i.creditBuilder(ctx, p.TransactionIdentity, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +191,7 @@ func (i *Invisi) PrepareCreateCredit(ctx context.Context, p ExplicitCreateCredit
 func (i *Invisi) PrepareUpdateCredit(ctx context.Context, p ExplicitUpdateCreditPreparation) (result *credit.Prepared, failure error) {
 	defer func() { failure = WrapPreparation("prepareUpdateCredit", failure) }()
 	p.UpdatePreparation = p.UpdatePreparation.Clone()
-	b, err := i.creditBuilder(ctx, p.TransactionIdentity, p.Inputs)
+	b, err := i.creditBuilder(ctx, p.TransactionIdentity, p.Inputs, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +200,7 @@ func (i *Invisi) PrepareUpdateCredit(ctx context.Context, p ExplicitUpdateCredit
 func (i *Invisi) PrepareDrawCredit(ctx context.Context, p ExplicitDrawCreditPreparation) (result *credit.Prepared, failure error) {
 	defer func() { failure = WrapPreparation("prepareDrawCredit", failure) }()
 	p.DrawPreparation = p.DrawPreparation.Clone()
-	b, err := i.creditBuilder(ctx, p.TransactionIdentity, p.Inputs)
+	b, err := i.creditBuilder(ctx, p.TransactionIdentity, p.Inputs, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +209,7 @@ func (i *Invisi) PrepareDrawCredit(ctx context.Context, p ExplicitDrawCreditPrep
 func (i *Invisi) PrepareRevokeCredit(ctx context.Context, p ExplicitRevokeCreditPreparation) (result *credit.Prepared, failure error) {
 	defer func() { failure = WrapPreparation("prepareRevokeCredit", failure) }()
 	p.RevokePreparation = p.RevokePreparation.Clone()
-	b, err := i.creditBuilder(ctx, p.TransactionIdentity, nil)
+	b, err := i.creditBuilder(ctx, p.TransactionIdentity, nil, &p.RevokePreparation)
 	if err != nil {
 		return nil, err
 	}

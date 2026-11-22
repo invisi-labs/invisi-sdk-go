@@ -111,8 +111,22 @@ func Positive(amount *big.Int, bits int) error {
 }
 
 func (s *Runtime) Frame(ctx context.Context, token common.Address, deadline uint64) (protocol.TransactionContext, protocolrpc.CanonicalBlock, uint64, error) {
+	return s.frame(ctx, token, deadline, true)
+}
+
+// RevocationFrame validates a revocation without requiring token code when no fee moves tokens.
+func (s *Runtime) RevocationFrame(ctx context.Context, token common.Address, deadline uint64, fee *big.Int) (protocol.TransactionContext, protocolrpc.CanonicalBlock, uint64, error) {
+	return s.frame(ctx, token, deadline, fee != nil && fee.Sign() != 0)
+}
+
+func (s *Runtime) frame(ctx context.Context, token common.Address, deadline uint64, requireToken bool) (protocol.TransactionContext, protocolrpc.CanonicalBlock, uint64, error) {
 	var block protocolrpc.CanonicalBlock
-	c, e := s.Protocol.ForToken(token)
+	c := protocol.TransactionContext{ChainID: new(big.Int).SetUint64(s.Protocol.Context().ChainID), ProtocolAddress: s.Protocol.Context().ProtocolAddress, TokenAddress: token}
+	var e error
+	if requireToken {
+		c, e = s.Protocol.ForToken(token)
+	}
+
 	if e != nil {
 		return c, block, 0, e
 	}
@@ -143,12 +157,14 @@ func (s *Runtime) Frame(ctx context.Context, token common.Address, deadline uint
 		return c, block, 0, errors.New("invalid deadline")
 	}
 	c.Now = new(big.Int).SetUint64(timestamp)
-	code, e := s.Options.Provider.CodeAt(ctx, token, new(big.Int).SetUint64(block.Number))
-	if e != nil {
-		return c, block, 0, e
-	}
-	if len(code) == 0 {
-		return c, block, 0, errors.New("token address must have contract code")
+	if requireToken {
+		code, e := s.Options.Provider.CodeAt(ctx, token, new(big.Int).SetUint64(block.Number))
+		if e != nil {
+			return c, block, 0, e
+		}
+		if len(code) == 0 {
+			return c, block, 0, errors.New("token address must have contract code")
+		}
 	}
 	readState := s.PreparationInventory
 	if s.SummaryReader != nil {

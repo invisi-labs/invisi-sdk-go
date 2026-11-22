@@ -60,7 +60,19 @@ func (s *WalletSession) buildCreditRequestWithRuntime(ctx context.Context, r *tr
 		Owner:   s.wallet.GetAddress,
 		Resolve: r.ResolveRecipient,
 		Frame: func(ctx context.Context, token common.Address, deadline uint64) (credit.Context, uint64, error) {
-			c, b, d, err := r.Frame(ctx, token, deadline)
+			var c protocol.TransactionContext
+			var b protocolrpc.CanonicalBlock
+			var d uint64
+			var err error
+			if revoke, ok := request.(credit.RevokePreparation); ok {
+				var fee *big.Int
+				if revoke.Fee != nil {
+					fee = revoke.Fee.Amount
+				}
+				c, b, d, err = r.RevocationFrame(ctx, token, deadline, fee)
+			} else {
+				c, b, d, err = r.Frame(ctx, token, deadline)
+			}
 			if err != nil {
 				return credit.Context{}, 0, err
 			}

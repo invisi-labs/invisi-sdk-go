@@ -8,6 +8,8 @@ Create/update/draw export the frozen EIP-712 statement and sign with ordinary ge
 
 `01-bob-create --initial-payment 7` optionally creates the grant and pays its spender a private Note in one owner-authorized proof. The amount is the gross credit debit including the actual fee; the Note receives gross minus fee. The default remains pure grant creation. UTC day/month usage and available credit start after this debit.
 
+Fee-free revocation accepts any token namespace, including the zero address and addresses without contract code, through both explicit and managed APIs. It performs no ERC20 transfer. Paid revocations retain the normal token-contract and fee checks. Chain/deployment validation, canonical state, deadlines, owner authorization and permanent grant-ID disabling remain enforced; protocol version remains 1.
+
 Relay delivery is consolidated under [07-broadcaster](../07-broadcaster/README.md). Source evidence applies to private Note ancestry; the ordinary Credit transitions shown here do not require a Source proof.
 
 ## Contributing
