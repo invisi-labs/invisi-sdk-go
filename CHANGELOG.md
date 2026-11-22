@@ -1,16 +1,30 @@
 # Changelog
 
-## Unreleased
+## 1.3.4
 
-- Validate managed wallet and chain/Core deployment scope before restoring Credit operations. Rejected recovery leaves the journal, worker lease and input reservations unchanged; valid recovery retains reservations until explicitly released.
+Upgrade the complete eight-module cohort together: root SDK, primitives, protocol, prover, rpc, session, ipp and paymentrouter. Internal requirements and isolated module checks target `v1.3.4`.
+
+### Credit preparation and recovery
+
+- Support zero-token, zero-fee Credit pre-revocation without requiring ERC20 metadata, balances, allowances or deployed token bytecode. Keep deployment, owner, uint128 grant ID and canonical authority checks; paid revocation still requires the token and fee checks.
+- Allow canonical indexed `GetCreditStatus` reads in the zero-token namespace, retaining positive grant IDs, owner validation and block-bound responses.
+- Check the managed wallet and chain/Core deployment before restoring a Credit journal, invoking a backend or transferring its worker lease. A rejected recovery leaves the journal and reservations unchanged; matching recovery fences the previous handle and preserves inputs until explicit release or canonical reconciliation.
+- Expand receiving-snapshot tampering/isolation coverage and Credit recovery tests. Reservation assertions use commitment-and-role keys and verify that rejection cannot consume or release a grant.
+
+### Historical Provenance recovery
+
+- Deliver locally replaced Source evidence for authenticated, confirmed tracked recovery through `SubmitSourceProof`, including recovery after the original payment deadline. Persist the accepted replacement proof and tracking reference before polling so an interrupted client resumes that delivery instead of issuing another payment.
+- Keep initial preparation on preflight and require canonical confirmed facts before historical delivery. Pending or reorged facts cannot use the confirmed recovery path; custom recovery services must expose historical source submission explicitly.
+
+### Compatibility
+
+- Retain the Core ABI, circuits, authenticated Core/Provenance resource pins and stored session schema from v1.3.3. No contract redeployment or database reset is required for this patch; wallet applications and services should resolve published v1.3.4 modules rather than local replacements.
 
 ## 1.3.3
 
 This release includes the complete eight-module cohort: root SDK, primitives, protocol, prover, rpc, session, ipp and paymentrouter. Upgrade their requirements together to `v1.3.3`.
 
 ### Core and Credit compatibility
-
-- Allow indexed `GetCreditStatus` reads for the zero-token fee-free pre-revocation namespace while retaining owner, positive uint128 ID, scope and canonical-block validation.
 
 - Replace Credit allocation shard/slot and revocation bitmaps with positive uint128 grant IDs, scoped by chain, Core, owner and token. `GrantID` is a `*big.Int`; JSON/RPC uses canonical decimal strings. Creation accepts an explicit ID or generates one cryptographically before encryption/proving, then preserves it through quotations, retries, initial-payment construction and recovery.
 - Add canonical `GetCreditStatus`/contract status reads: 0 unknown, 1 active, 2 permanently disabled. Create requires unknown; draw/update require active; revoke accepts unknown or active without needing private grant state. Managed inventory keeps unknown grants visible but unselectable, preserves later anchored observations during historical replay, and retains permanent disables across successor commitments.
@@ -28,8 +42,6 @@ This release includes the complete eight-module cohort: root SDK, primitives, pr
 - Document frozen-request recovery: persist the literal submission body and returned ID, restore quote context only after trusted verification, and reconcile uncertain sends before creating another payment. An expired frozen quote requires the documented exact-body recovery path rather than bypassing SDK expiry checks.
 
 ### Proving resources and Provenance
-
-- Deliver locally replaced Source evidence for authenticated confirmed tracked recovery through `SubmitSourceProof`, allowing historical recovery after the original native deadline. Persist the validated replacement proof and tracker before polling so an outage resumes the same accepted delivery. Initial preparation still uses preflight; pending/reorged facts cannot deliver historical evidence, and custom recovery services must expose the historical submission method.
 
 - Load recursive verification-key fields lazily from authenticated binary resources instead of embedding all field arrays. Native aggregation inherits local directory, mirror, cache and offline policy; dedicated routes load the required capacity, mixed routes C1–C5. Custom backends can provide `VerificationKeyLoader` or an explicit `AggregatorOptions` fallback. Canonical field checks, SHA256, Poseidon2 commitment and member/outer proof verification remain enforced.
 - Pin current Core resources to `85a5d1dffe40fc965ab4345a28b632f463c3ad861c44d5845850fbc7447fd8f6` from Core `4940be21de91689b59ba1a2fe46945f767c3a34c`. Retain independent Provenance pin `8d5a3e60e3e5cbe315150511207d7aff67f4e2924148d396b67d82017ecd1f1c` from Periphery `33ba458ea11e07da282c21b8a2b091a0be1ebd01`. Objects load from immutable `/prover/sets/<index>/` catalogs. The split Core/Provenance loader is retained from the preceding release: each capability loads only its own catalog and shares authenticated content-addressed cache policy.
