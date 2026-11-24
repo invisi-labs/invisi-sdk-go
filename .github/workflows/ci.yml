@@ -37,6 +37,8 @@ jobs:
         run: python3 scripts/test_ci_reuse.py
       - name: Test release validation
         run: python3 scripts/test_release_checks.py
+      - name: Test release recovery input validation
+        run: python3 scripts/test_release_recovery.py
       - name: Test versioned release notes
         run: python3 scripts/test_release_notes.py
       - name: Test authenticated proving metadata synchronization

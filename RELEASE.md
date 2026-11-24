@@ -30,7 +30,25 @@ git push --atomic origin \
   session/v1.3.5 ipp/v1.3.5 paymentrouter/v1.3.5 v1.3.5
 ```
 
-The root-tag workflow validates all actual remote tags before publication and
-checks each isolated archive. Wait for the GitHub release workflow to finish,
-then resolve all eight modules at `v1.3.5` from a fresh consumer without local
-replacement directives before upgrading downstream applications.
+GitHub does not emit tag push events when more than three tags are pushed in
+one operation. The eight-tag atomic publication above therefore requires the
+explicit recovery/publication workflow, rather than waiting for a root-tag push
+workflow that GitHub will not start:
+
+```sh
+gh workflow run recover-release.yml --ref main \
+  -f release_tag=v1.3.5 -f expected_sha="$RELEASE_COMMIT"
+```
+
+The dispatcher runs from the selected trusted workflow revision, but checks out
+the existing release tag and requires its actual commit to equal the explicit
+full SHA. It independently requires successful develop/main push CI at that
+exact release commit, verifies all eight actual remote tags, checks isolated
+archives and renders the tagged changelog before publishing. The dispatcher
+revision is never substituted for the release commit. Existing tags are not
+rewritten or recreated. The ordinary single-root-tag workflow retains the same
+validation for push events that GitHub does emit.
+
+Wait for the dispatched release workflow to succeed, then resolve all eight
+modules at `v1.3.5` from a fresh consumer without local replacement directives
+before upgrading downstream applications.

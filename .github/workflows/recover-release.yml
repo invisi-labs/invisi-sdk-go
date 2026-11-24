@@ -1,0 +1,66 @@
+name: Recover existing Go release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing stable root tag to publish
+        required: true
+        type: string
+      expected_sha:
+        description: Exact reviewed 40-character release commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: go-release-recovery-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: read
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Validate immutable release coordinates
+        run: |
+          python3 - <<'PY'
+          import os, re
+          assert re.fullmatch(r'v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', os.environ['RELEASE_TAG']), 'stable root tag required'
+          assert re.fullmatch(r'[0-9a-f]{40}', os.environ['EXPECTED_SHA']), 'full expected commit required'
+          PY
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
+          persist-credentials: false
+      - name: Require exact reviewed commit and successful branch CI
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$(python3 scripts/check-ci-reuse.py "$EXPECTED_SHA" develop,main)" = verified=true
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: '**/go.sum'
+      - name: Verify all remote tags and isolated module archives
+        run: python3 scripts/check-packages.py --tag "$RELEASE_TAG"
+      - name: Render reviewed release notes
+        run: python3 scripts/release-notes.py "$RELEASE_TAG" --output "$RUNNER_TEMP/release-notes.md"
+      - name: Publish existing reviewed tag
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false \
+              --title "Go SDK $RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "Go SDK $RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
