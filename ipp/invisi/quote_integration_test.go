@@ -58,8 +58,8 @@ func TestIPPNoFeeThenBroadcasterQuotePreservesFrozenNet(t *testing.T) {
 		name     string
 		fee, cap int64
 		quota    string
-		fail     bool
-	}{{"fee one", 1, 1, "10", false}, {"fee cap", 2, 1, "10", true}, {"quota", 1, 2, "5", true}} {
+		wantErr  string
+	}{{"fee one", 1, 1, "10", ""}, {"fee cap", 2, 1, "10", "broadcaster fee exceeds the approved limit"}, {"quota", 1, 2, "5", "single limit exceeded"}} {
 		t.Run(test.name, func(t *testing.T) {
 			request.Credit.SingleLimit = test.quota
 			prepared, e := PrepareRequest(ctx, request, Target[*credit.Prepared]{Context: deployment, PrepareCreateCredit: builder.Create}, Options{Now: func() time.Time { return now }})
@@ -87,6 +87,16 @@ func TestIPPNoFeeThenBroadcasterQuotePreservesFrozenNet(t *testing.T) {
 				}
 				var result any
 				switch q.Method {
+				case "broadcaster_getStatus":
+					// No fee-lock capability: exercise the legacy quote path after discovery.
+					result = broadcaster.ServiceStatus{
+						APIVersion:      "v1",
+						ProtocolVersion: "1",
+						ChainID:         "8453",
+						Protocol:        deployment.ProtocolAddress,
+						Sender:          ethcrypto.PubkeyToAddress(key.PublicKey),
+						FeeRecipient:    recipient,
+					}
 				case "broadcaster_estimateQuote":
 					result = broadcaster.Fee{FeeRecipient: recipient, FeeAmount: big.NewInt(test.fee).String(), MaxGas: "2000000"}
 				case "broadcaster_getQuote":
@@ -124,9 +134,9 @@ func TestIPPNoFeeThenBroadcasterQuotePreservesFrozenNet(t *testing.T) {
 				t.Fatal(e)
 			}
 			e = client.Quote(ctx, prepared, credit.BroadcasterQuoteOptions{MaxFeeAmount: big.NewInt(test.cap)})
-			if test.fail {
-				if e == nil {
-					t.Fatal("accepted fee or quota overflow")
+			if test.wantErr != "" {
+				if e == nil || !strings.Contains(e.Error(), test.wantErr) {
+					t.Fatalf("expected %q, got %v", test.wantErr, e)
 				}
 				unchanged, _ := prepared.ExportIntent()
 				if unchanged.Create.TotalAmount.Int64() != 5 || unchanged.Broadcaster != nil {
