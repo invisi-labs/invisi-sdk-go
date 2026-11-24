@@ -4,7 +4,7 @@ The four runnable walkthroughs below use ordinary Core managed Note transfers. B
 
 | Example | Flow |
 | --- | --- |
-| `01-prepare-and-broadcast` | Discover registered relay, freeze the final fee quote, authorize and prove the payment. On explicit submit, the SDK generates required Source evidence and the relay submits it before broadcasting. |
+| `01-prepare-and-broadcast` | Discover registered relay, freeze the final fee quote, authorize and prove the payment. Call `Ready` to generate any required Source evidence. Explicit submission passes the completed envelope to the relay. |
 | `02-pre-submit-provenance` | Prove the main payment, independently prove and submit Source evidence, verify its allowed tracking acknowledgement, then optionally send the unchanged payment with a geth signer. |
 | `03-recover-and-submit-provenance` | Persist an ordinary main payment in the encrypted journal, send it, restart without an account key, reconcile canonical confirmation and generate/submit Source evidence. Optionally export or submit a standalone public proof packet. |
 | `04-scheduled-cancel` | Prepare and prove a scheduled Note transfer, submit, resume the encrypted operation by its local ID, query the returned Broadcaster ID, then cancel and reconcile canonical input state. |

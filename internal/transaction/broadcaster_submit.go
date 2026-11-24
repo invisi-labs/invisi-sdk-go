@@ -9,8 +9,12 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 
+	"github.com/invisi-labs/invisi-sdk-go/internal/storewatch"
+	"github.com/invisi-labs/invisi-sdk-go/primitives"
 	"github.com/invisi-labs/invisi-sdk-go/provenance"
+	protocolrpc "github.com/invisi-labs/invisi-sdk-go/rpc"
 	"github.com/invisi-labs/invisi-sdk-go/rpc/broadcaster"
+	"github.com/invisi-labs/invisi-sdk-go/rpc/chain"
 )
 
 func (o *Execution) ExportBroadcasterQuoteInternal() (broadcaster.SignedQuote, error) {
@@ -78,8 +82,33 @@ func (o *Execution) SubmitViaBroadcaster(ctx context.Context, c *broadcaster.Cli
 	if o.Plan.Broadcaster.CancellationConfirmed {
 		return empty, errors.New("broadcaster cancellation already acknowledged")
 	}
+	if o.Plan.Broadcaster.SubmissionRefusal != "" {
+		return empty, errors.New("broadcaster submission was refused; prepare again: " + o.Plan.Broadcaster.SubmissionRefusal)
+	}
 	retry := o.Status == "uncertain" || o.Status == "submitted"
+	o.FirstExternalization = !retry && !o.PriorExternalized && o.Runtime.OnExternalize == nil
+	managed := !retry && o.canDelegateManagedShield(ctx)
+	var checkNetwork func(context.Context) error
 	if !retry {
+		provider := o.Runtime.SendProvider
+		if provider == nil {
+			provider = func() protocolrpc.ChainProvider { return o.Runtime.Options.Provider }
+		}
+		checkNetwork = o.Runtime.Protocol.CaptureSendNetwork(provider)
+	}
+	var walletGeneration uint64
+	if !retry && o.Runtime.SendGeneration != nil {
+		var err error
+		walletGeneration, err = o.Runtime.SendGeneration(ctx, o)
+		if err != nil {
+			return empty, err
+		}
+	}
+	policyGuard := c.SubmissionPolicyGuard()
+	if !retry {
+		if o.requiresSource() && o.Plan.Provenance == nil {
+			return empty, errors.New("call Ready to finalize the required provenance proof before submission")
+		}
 		if o.Runtime.Options.Provider == nil {
 			return empty, &MissingCapabilityError{Capability: "Chain RPC provider for first broadcaster submission"}
 		}
@@ -89,7 +118,11 @@ func (o *Execution) SubmitViaBroadcaster(ctx context.Context, c *broadcaster.Cli
 		if e := o.ValidateRecovered(); e != nil {
 			return empty, e
 		}
-		if e := o.ValidateExport(ctx); e != nil {
+		if managed {
+			if e := o.Runtime.Protocol.ValidateDeployment(ctx, o.Runtime.Options.Provider); e != nil {
+				return empty, e
+			}
+		} else if e := o.ValidateExport(ctx); e != nil {
 			return empty, e
 		}
 	}
@@ -102,11 +135,7 @@ func (o *Execution) SubmitViaBroadcaster(ctx context.Context, c *broadcaster.Cli
 		if _, e = c.SubmissionRequirements(ctx, signed); e != nil {
 			return empty, e
 		}
-		if required && o.Plan.Kind == "transact" && len(o.Plan.Inputs) > 0 && o.Plan.Provenance == nil {
-			if e = o.ProveProvenance(ctx); e != nil {
-				return empty, e
-			}
-		}
+
 		if required {
 			if e = o.validateProvenance(ctx, o.Plan.Provenance, true); e != nil {
 				return empty, e
@@ -151,7 +180,49 @@ func (o *Execution) SubmitViaBroadcaster(ctx context.Context, c *broadcaster.Cli
 	if e = o.Persist(context.WithoutCancel(ctx), o.Status); e != nil {
 		return empty, e
 	}
+	if !retry {
+		var finish func() bool
+		if o.Runtime.ObserveSendWrites != nil {
+			finish = o.Runtime.ObserveSendWrites()
+		}
+		e = storewatch.Check(finish, func() error {
+			return policyGuard(ctx, func(ctx context.Context) error {
+				if o.Runtime.SendGeneration != nil {
+					generation, err := o.Runtime.SendGeneration(ctx, o)
+					if err != nil {
+						return err
+					}
+					if generation != walletGeneration {
+						return errors.New("wallet history changed after freezing broadcaster submission")
+					}
+				}
+
+				if managed && o.Plan.RetainedShieldAnchor && !o.currentShieldReceipt(ctx) {
+					return errors.New("Shield authority changed after freezing broadcaster submission")
+				}
+				return checkNetwork(ctx)
+			})
+		})
+		if e != nil {
+			return empty, e
+		}
+	}
+	o.PriorExternalized = true
 	result, sendErr := c.SubmitPrepared(ctx, *o.Plan.Broadcaster.Request)
+	var refusal *broadcaster.SubmissionRefusedError
+	if !retry && o.FirstExternalization && errors.As(sendErr, &refusal) {
+		frozenRequest := o.Plan.Broadcaster.Request
+		o.Plan.Broadcaster.Request = nil
+		o.Plan.Broadcaster.SubmissionRefusal = refusal.Reason
+		o.Status = "ready"
+		if rollbackErr := o.Persist(context.WithoutCancel(ctx), o.Status); rollbackErr != nil {
+			o.Plan.Broadcaster.Request = frozenRequest
+			o.Plan.Broadcaster.SubmissionRefusal = ""
+			o.Status = "uncertain"
+			return result, errors.Join(sendErr, rollbackErr)
+		}
+		return result, sendErr
+	}
 	if sendErr == nil {
 		if o.Plan.Broadcaster.RequestID != "" && o.Plan.Broadcaster.RequestID != result.ID {
 			return result, errors.New("broadcaster changed submission ID")
@@ -211,7 +282,24 @@ func (o *Execution) ValidateBroadcasterPlan() error {
 		return errors.New("broadcaster intent differs from Frozen operation")
 	}
 
-	if e = o.validateProvenance(context.Background(), o.Plan.Provenance, false); e != nil {
+	// New journals retain the original public trust keys for offline validation.
+	// First submit independently checks the live Source trust and canonical anchors.
+	source := o.Plan.Provenance
+	attempted := saved.Request != nil && (o.Status == "uncertain" || o.Status == "submitted")
+	if source != nil && source.Trust != nil {
+		if e = o.validateSourceStatement(source, source.Endpoint, *source.Trust); e != nil {
+			return e
+		}
+	} else if attempted && o.requiresSource() {
+		// Older frozen journals predate retained trust; authenticate the quote and
+		// exact packet, and check the ordered statement without resolving fresh trust.
+		if source == nil {
+			return errors.New("frozen provenance proof missing")
+		}
+		if e = o.validateSourceBinding(source); e != nil {
+			return e
+		}
+	} else if e = o.validateProvenance(context.Background(), source, false); e != nil {
 		return e
 	}
 	return broadcaster.VerifyQuote(saved.Signed, broadcaster.Trust{ChainID: saved.ChainID, Protocol: saved.Protocol, Signer: saved.Configuration.QuoteSigner}, data, 0)
@@ -308,4 +396,59 @@ func (p *PreparedTransaction) cancelViaBroadcaster(ctx context.Context, c *broad
 		}
 	}
 	return result, e
+}
+
+// Only a self-contained native-policy Shield can rely on exact broadcaster
+// simulation and contract execution for mutable execution validity. Manual,
+// custom-provider/verifier, registry, private, permit and scheduling paths stay full.
+func (o *Execution) canDelegateManagedShield(ctx context.Context) bool {
+	if binding, ok := o.Runtime.Options.Provider.(*chain.HTTPBinding); !ok || binding == nil {
+		return false
+	}
+	return o.nativeManagedShieldShape(ctx) && len(o.Plan.Funding.Signature) > 0
+}
+func (o *Execution) nativeManagedShieldShape(ctx context.Context) bool {
+	if binding, ok := o.Runtime.Options.Provider.(*chain.HTTPBinding); !ok || binding == nil {
+		return false
+	}
+	p := o.Plan
+	if p.RetainedShieldAnchor && !o.currentShieldReceipt(ctx) {
+		return false
+	}
+	if o.PriorExternalized || o.Runtime.Options.FundingVerifier != nil || p.Kind != "shield" || len(p.Inputs) != 0 || p.FundingMode != "signature" || p.Funding.Amount == nil || p.Funding.Amount.Sign() <= 0 || p.Provenance != nil || p.Broadcaster == nil || p.Broadcaster.Signed.ProvenanceRequired || p.Broadcaster.Signed.Quote.Execution != "direct" || p.Broadcaster.Signed.Quote.Schedule != nil || len(p.Outputs) == 0 {
+		return false
+	}
+	if p.Funding.Permit.Deadline != nil && p.Funding.Permit.Deadline.Sign() != 0 {
+		return false
+	}
+	for _, out := range p.Outputs {
+		decoded, err := primitives.DecodeAddress(out.Address)
+		if err != nil || decoded.Kind != "long" || out.Note == nil {
+			return false
+		}
+	}
+	return true
+}
+
+func (o *Execution) currentShieldReceipt(ctx context.Context) bool {
+	a := o.Plan.shieldReceipt
+	return a != nil && a.Block == o.Plan.Block && a.Token == o.Plan.Context.TokenAddress && a.Check(ctx, o.Runtime) == nil
+}
+
+func (o *Execution) localQuotedFunding(ctx context.Context) bool {
+	if !o.nativeManagedShieldShape(ctx) {
+		return false
+	}
+	binding := o.Runtime.Options.Provider.(*chain.HTTPBinding)
+	saved := o.Plan.Broadcaster
+	return saved.nativeBinding == binding && saved.nativeEpoch == binding.Epoch()
+}
+
+func (o *Execution) quotedBindingRetired() bool {
+	saved := o.Plan.Broadcaster
+	if saved == nil || saved.nativeBinding == nil {
+		return false
+	}
+	binding, ok := o.Runtime.Options.Provider.(*chain.HTTPBinding)
+	return !ok || binding == nil || binding != saved.nativeBinding || binding.Epoch() != saved.nativeEpoch
 }

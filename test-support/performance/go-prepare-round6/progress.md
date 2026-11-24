@@ -1,0 +1,10 @@
+# Round-six progress
+
+- User goal: move quote capability discovery to initialization, ordinary8→7, preserve fee-lock safety/recovery. Already-rebased HEAD a51f78d stays unchanged.
+- Root froze exact old production before edits. Final shared driver adds feeLock on/off with actual signed tariff checks, compiled identically into independent before/after binaries at /tmp/invisi-go-prepare-round6-v2-20261125.
+- Primary service source confirms TokenSupport embeds full GetStatus; no added init RPC needed. Owner implemented private copied capability guarded by exact discovery publication/source/provider/epoch/HTTP policy. Direct explicit low-level initializer performs real service query; caller owns validity callback. README documents boundary; it grants no native chain authority.
+- RED/fixes cover pending Get/init overlap, default HTTP transport replacement, public SupportsToken observation, source replacement, generation/CAS overlaps and shared scoped receipt revocation. Focused RPC race passed. Owner report records commands/evidence.
+- Independent review GREEN, no blockers. Reviewer text manifest covers724files including go.work.sum; SHA256 0b1eaba865e2f04a45ee7f0789fd1e84fbe006fbd8196cdaf52ca20e4066dc0b independently matched actual bytes. Diagnostic source filter excludes generated go.work.sum; all other reviewed source matches frozen after. No production changes after review/freeze.
+- Four zero-delay actualHTTP controls passed: init6 and cold7 allgroups, legacybefore8/after7 bothflows, enabledbefore9/after8 bothflows. Actual nonce7/14 and intact first journal checked by driver. Full9module and8archive suites running sequentially; timed groups pending, no timing under heavy load.
+
+- COMPLETE: full9 module boundary/race/vet/build and8 archive checks exit0; HEAVY_DONE before measurements. Four20ms groups ran sequentially and independently verified168phase rows. Legacy8→7, enabled9→8 eachflow, init6/cold7 unchanged. First legacy212.96→180.12ms; all-in498.48→461.57ms; enabled237.29→212.14ms, all-in524.72→497.95ms. Reports/results/checks hashes saved; production unchanged from reviewed freeze. No rebase/commit/release/real broadcast.

@@ -21,6 +21,10 @@ type Execution struct {
 	Data            []byte
 	TransactionHash common.Hash
 	WorkerID        string
+	// PriorExternalized is durable session authority or a detached manual export.
+	PriorExternalized bool
+	// FirstExternalization is set only by the atomic durable externalization hook.
+	FirstExternalization bool
 }
 
 func (o *Execution) ID() string { return o.Plan.ID }
@@ -48,6 +52,11 @@ func ClonePlan(plan Plan) (Plan, error) {
 	}
 	var result Plan
 	e = json.Unmarshal(raw, &result)
+	if e == nil && plan.Broadcaster != nil && result.Broadcaster != nil {
+		result.Broadcaster.nativeBinding = plan.Broadcaster.nativeBinding
+		result.Broadcaster.nativeEpoch = plan.Broadcaster.nativeEpoch
+	}
+	result.shieldReceipt = plan.shieldReceipt
 	return result, e
 }
 

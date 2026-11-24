@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/invisi-labs/invisi-sdk-go/primitives"
 	protocolrpc "github.com/invisi-labs/invisi-sdk-go/rpc"
+	"github.com/invisi-labs/invisi-sdk-go/rpc/chain"
 	"math/big"
 	"sync"
 )
@@ -145,21 +146,27 @@ func (p *snapshotProvider) TransactionReceipt(context.Context, common.Hash) (*ty
 
 // SnapshotRecorder pins reads to one real header. It is private to a sync, not shared between accounts.
 type SnapshotRecorder struct {
+	protocol *chain.Protocol
 	Provider
 	Snapshot *PreparationSnapshot
 	mu       sync.Mutex
 	reads    *preparationReads
 }
 
-func NewSnapshotRecorder(p Provider, snapshot *PreparationSnapshot) *SnapshotRecorder {
-	return &SnapshotRecorder{Provider: p, Snapshot: snapshot, reads: newPreparationReads()}
+func NewSnapshotRecorder(p Provider, snapshot *PreparationSnapshot, deployment *chain.Protocol) *SnapshotRecorder {
+	return &SnapshotRecorder{Provider: p, Snapshot: snapshot, protocol: deployment, reads: newPreparationReads()}
 }
 func (r *SnapshotRecorder) ChainID(ctx context.Context) (*big.Int, error) {
-	n, e := r.Provider.ChainID(ctx)
-	if e == nil && (n == nil || !n.IsUint64() || n.Uint64() != r.Snapshot.Scope.ChainID) {
+	// Validate the actual provider so a wrong network retires an owned
+	// binding's epoch, including receipts held by other wallet sessions.
+	if err := r.protocol.ValidateNetwork(ctx, r.Provider); err != nil {
+		return nil, err
+	}
+	n := r.protocol.Context().ChainID
+	if n != r.Snapshot.Scope.ChainID {
 		return nil, errors.New("preparation chain identity changed")
 	}
-	return n, e
+	return new(big.Int).SetUint64(n), nil
 }
 func (r *SnapshotRecorder) HeaderByNumber(ctx context.Context, n *big.Int) (*types.Header, error) {
 	if n == nil {

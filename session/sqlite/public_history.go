@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/invisi-labs/invisi-sdk-go/internal/storewatch"
 	"github.com/invisi-labs/invisi-sdk-go/session"
 	"sync"
 )
@@ -49,7 +50,12 @@ func (s *PublicHistoryStore) Read(ctx context.Context, key string) (session.Publ
 	}
 	return v, nil
 }
+func (s *PublicHistoryStore) ObserveScopeWrites(scope string) func() bool {
+	return storewatch.Observe(s.db, "history/"+scope)
+}
+
 func (s *PublicHistoryStore) Update(ctx context.Context, key string, fn func(*session.PublicHistoryState) error) error {
+	defer storewatch.Write(s.db, "history/"+key)()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, e := s.db.BeginTx(ctx, nil)

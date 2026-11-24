@@ -12,6 +12,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/invisi-labs/invisi-sdk-go/internal/storewatch"
 	"github.com/invisi-labs/invisi-sdk-go/protocol"
 	"github.com/invisi-labs/invisi-sdk-go/protocol/receipts"
 	protocolrpc "github.com/invisi-labs/invisi-sdk-go/rpc"
@@ -109,7 +110,12 @@ func (s *MemoryPublicHistoryStore) ReadPayload(ctx context.Context, key string, 
 	}
 	return append(json.RawMessage(nil), raw...), nil
 }
+func (s *MemoryPublicHistoryStore) ObserveScopeWrites(scope string) func() bool {
+	return storewatch.Observe(s, scope)
+}
+
 func (s *MemoryPublicHistoryStore) Update(ctx context.Context, key string, fn func(*PublicHistoryState) error) error {
+	defer storewatch.Write(s, key)()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v, e := ClonePublicHistory(s.states[key])
@@ -141,6 +147,11 @@ func (s *MemoryPublicHistoryStore) Update(ctx context.Context, key string, fn fu
 	return e
 }
 
+func updatePublicHistory(ctx context.Context, store PublicHistoryStore, key string, change func(*PublicHistoryState) error) error {
+	defer storewatch.WriteAdapter(store, key)()
+	return store.Update(ctx, key, change)
+}
+
 func PutPublicPage(ctx context.Context, s PublicHistoryStore, key string, p PublicPage, generation uint64) error {
 	raw, e := json.Marshal(p)
 	if e != nil {
@@ -150,7 +161,7 @@ func PutPublicPage(ctx context.Context, s PublicHistoryStore, key string, p Publ
 	if len(raw) > r.MaxPageBytes {
 		return errors.New("public page exceeds byte limit; use a smaller range")
 	}
-	return s.Update(ctx, key, func(v *PublicHistoryState) error {
+	return updatePublicHistory(ctx, s, key, func(v *PublicHistoryState) error {
 		if v.Generation != generation {
 			return errors.New("public history generation changed")
 		}
@@ -269,7 +280,7 @@ func (h *PublicHistory) Snapshot(ctx context.Context) (PublicHistoryState, error
 	return h.options.Store.Read(ctx, h.key)
 }
 func (h *PublicHistory) PruneBefore(ctx context.Context, block uint64) error {
-	return h.options.Store.Update(ctx, h.key, func(v *PublicHistoryState) error {
+	return updatePublicHistory(ctx, h.options.Store, h.key, func(v *PublicHistoryState) error {
 		refs := v.Pages[:0]
 		for _, r := range v.Pages {
 			if r.Range.ToBlock >= block {
@@ -287,7 +298,7 @@ func (h *PublicHistory) checkCanonical(ctx context.Context, v PublicHistoryState
 			return e
 		}
 		if head == nil || head.Hash() != r.Block.Hash {
-			e = h.options.Store.Update(ctx, h.key, func(s *PublicHistoryState) error {
+			e = updatePublicHistory(ctx, h.options.Store, h.key, func(s *PublicHistoryState) error {
 				if s.Generation != v.Generation {
 					return errors.New("public history generation changed")
 				}

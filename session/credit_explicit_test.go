@@ -2,8 +2,11 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 	"math/big"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -70,5 +73,43 @@ func TestDetachedCreditRequestsBuildWithoutManagedStore(t *testing.T) {
 	}
 	if len(state.PostpaidCredit.Operations) != 0 {
 		t.Fatal("detached Credit preparation persisted managed state")
+	}
+}
+
+func TestDetachedSDKCreditFencesLiveNetworkAndPreservesRecovery(t *testing.T) {
+	ctx := context.Background()
+	s, token, _ := testSession(t, 2000000000)
+	provider := &finalNetworkProvider{sessionProvider: s.options.Provider.(sessionProvider)}
+	invisi := sdk.NewInvisi(sdk.InvisiOptions{Provider: provider, ProtocolRPC: s.rpc})
+	p, err := invisi.PrepareRevokeCredit(ctx, sdk.ExplicitRevokeCreditPreparation{TransactionIdentity: sdk.TransactionIdentity{Wallet: s.wallet, Protocol: s.protocol}, RevokePreparation: credit.RevokePreparation{TokenAddress: token, GrantID: big.NewInt(1)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr, _ := s.wallet.GetAddress()
+	payment, err := s.PrepareTransfer(ctx, sdk.TransferPreparation{TokenAddress: token, Outputs: testOutputs(s, []testPaymentOutput{{To: addr, Amount: big.NewInt(30)}})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sends atomic.Int64
+	c, _ := testBroadcasterExecution(t, payment, []int64{5}, false, nil, "direct", func(method string, _ json.RawMessage) {
+		if method == "broadcaster_submitTransaction" {
+			sends.Add(1)
+		}
+	})
+	if err = c.Quote(ctx, p, credit.BroadcasterQuoteOptions{MaxFeeAmount: big.NewInt(10)}); err != nil {
+		t.Fatal(err)
+	}
+	if err = p.WithRevocationSignature(ctx, make([]byte, 65), func(context.Context, common.Address, apitypes.TypedData, []byte) (bool, error) { return true, nil }); err != nil {
+		t.Fatal(err)
+	}
+	provider.changed.Store(true)
+	if _, err = c.Submit(ctx, p); err == nil || sends.Load() != 0 || p.Submission().State != "uncertain" {
+		t.Fatalf("first detached send crossed network fence: sends=%d submission=%+v err=%v", sends.Load(), p.Submission(), err)
+	}
+	if _, err = c.Submit(ctx, p); err != nil || sends.Load() != 1 {
+		t.Fatal("frozen detached retry", err)
+	}
+	if _, err = c.Submit(ctx, p); err != nil || sends.Load() != 1 {
+		t.Fatal("known detached retry", err)
 	}
 }

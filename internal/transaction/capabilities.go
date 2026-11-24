@@ -55,6 +55,12 @@ func VerifyTypedData(ctx context.Context, provider Provider, address common.Addr
 	if err != nil {
 		return false, err
 	}
+	return verifyTypedDataOnChain(ctx, provider, chain, address, data, signature, purpose)
+}
+
+// verifyTypedDataOnChain reuses a chain identity already checked against this
+// provider during the current validation. Signature and ERC-1271 state stay live.
+func verifyTypedDataOnChain(ctx context.Context, provider Provider, chain *big.Int, address common.Address, data apitypes.TypedData, signature []byte, purpose string) (bool, error) {
 	if data.Domain.ChainId == nil || chain.Cmp((*big.Int)(data.Domain.ChainId)) != 0 {
 		return false, errors.New(purpose + " verification chain mismatch")
 	}

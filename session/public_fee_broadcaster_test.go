@@ -39,11 +39,11 @@ func TestBroadcasterReplacesExistingPublicFee(t *testing.T) {
 				var original *Operation
 				var err error
 				if tc.kind == "shield" {
-					original, err = s.PrepareShield(ctx, sdk.ShieldPreparation{TokenAddress: token, Outputs: outputs, Fee: fee, Funding: sdk.FundingSource{Payer: s.wallet.OwnerAddress(), Amount: big.NewInt(tc.funding), Authorization: "caller"}})
+					original, err = s.PrepareShield(ctx, sdk.ShieldPreparation{TokenAddress: token, Outputs: outputs, Fee: fee, Funding: sdk.FundingSource{Payer: s.wallet.OwnerAddress(), Amount: big.NewInt(tc.funding), Authorization: "signature"}})
 				} else {
 					p := sdk.TransferPreparation{TokenAddress: token, Outputs: outputs, Fee: fee}
 					if tc.funding > 0 {
-						p.Funding = &sdk.FundingSource{Payer: s.wallet.OwnerAddress(), Amount: big.NewInt(tc.funding), Authorization: "caller"}
+						p.Funding = &sdk.FundingSource{Payer: s.wallet.OwnerAddress(), Amount: big.NewInt(tc.funding), Authorization: "signature"}
 					}
 					original, err = s.PrepareTransfer(ctx, p)
 				}
@@ -93,7 +93,7 @@ func TestExistingFeePermitCallbackUsesFinalReplacementGross(t *testing.T) {
 	ctx := context.Background()
 	s, token, _ := testSession(t, uint64(time.Now().Unix()))
 	address, _ := s.wallet.GetAddress()
-	original, err := s.PrepareShield(ctx, sdk.ShieldPreparation{TokenAddress: token, Outputs: testOutputs(s, []testPaymentOutput{{To: address, Amount: big.NewInt(30)}}), Fee: &sdk.Fee{Recipient: common.HexToAddress("0x1234"), Amount: big.NewInt(7)}, Funding: sdk.FundingSource{Payer: s.wallet.OwnerAddress(), Amount: big.NewInt(37), Authorization: "caller", Permit: &protocol.TokenPermit{Deadline: big.NewInt(time.Now().Unix() + 1000)}}})
+	original, err := s.PrepareShield(ctx, sdk.ShieldPreparation{TokenAddress: token, Outputs: testOutputs(s, []testPaymentOutput{{To: address, Amount: big.NewInt(30)}}), Fee: &sdk.Fee{Recipient: common.HexToAddress("0x1234"), Amount: big.NewInt(7)}, Funding: sdk.FundingSource{Payer: s.wallet.OwnerAddress(), Amount: big.NewInt(37), Authorization: "signature", Permit: &protocol.TokenPermit{Deadline: big.NewInt(time.Now().Unix() + 1000)}}})
 	if err != nil {
 		t.Fatal(err)
 	}

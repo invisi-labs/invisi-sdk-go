@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/invisi-labs/invisi-sdk-go/internal/storewatch"
 	creditsession "github.com/invisi-labs/invisi-sdk-go/session/credit"
 	"sort"
 )
@@ -164,6 +165,7 @@ func (m *MemoryWalletStore) retainRecords(scope WalletScope, v *WalletState) ([]
 }
 
 func (m *MemoryWalletStore) RestoreExternalizedOperations(ctx context.Context, scope WalletScope) error {
+	defer storewatch.Write(m, scope.Key())()
 	if e := ctx.Err(); e != nil {
 		return e
 	}

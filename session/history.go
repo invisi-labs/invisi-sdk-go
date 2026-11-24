@@ -10,6 +10,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/invisi-labs/invisi-sdk-go/internal/storewatch"
 	transaction "github.com/invisi-labs/invisi-sdk-go/internal/transaction"
 	"github.com/invisi-labs/invisi-sdk-go/primitives"
 	protocolrpc "github.com/invisi-labs/invisi-sdk-go/rpc"
@@ -233,11 +234,16 @@ type notifyingWalletStore struct {
 	notifications *sessionNotifications
 }
 
+func (s *notifyingWalletStore) ObserveScopeWrites(scope string) func() bool {
+	return storewatch.ObserveStore(s.base, scope)
+}
+
 func (s *notifyingWalletStore) ReadSnapshot(ctx context.Context, scope WalletScope) (WalletState, error) {
 	return s.base.ReadSnapshot(ctx, scope)
 }
 
 func (s *notifyingWalletStore) Update(ctx context.Context, scope WalletScope, update func(*WalletState) error) error {
+	defer storewatch.WriteAdapter(s.base, scope.Key())()
 	if err := s.base.Update(ctx, scope, update); err != nil {
 		return err
 	}

@@ -31,7 +31,7 @@ func (o *Operation) commitBroadcasterPlan(ctx context.Context) error {
 	}
 	return o.session.options.Store.Update(ctx, o.session.scope, func(state *WalletState) error {
 		record, ok := state.Operations[o.plan.ID]
-		if !ok || record.WorkerID != o.workerID || state.Invalidated {
+		if !ok || record.Externalized || record.WorkerID != o.workerID || state.Invalidated {
 			return errors.New("stale operation worker")
 		}
 		for _, n := range o.plan.Inputs {

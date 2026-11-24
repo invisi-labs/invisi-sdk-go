@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/invisi-labs/invisi-sdk-go/credit"
+	"github.com/invisi-labs/invisi-sdk-go/internal/storewatch"
 	"github.com/invisi-labs/invisi-sdk-go/prover"
 	protocolrpc "github.com/invisi-labs/invisi-sdk-go/rpc"
 	"github.com/invisi-labs/invisi-sdk-go/rpc/broadcaster"
@@ -81,6 +82,17 @@ func clone[T any](v T) (T, error) {
 }
 func CloneState(s State) (State, error) { return clone(s) }
 
+type observedStore struct{ Store }
+
+func (s observedStore) Update(ctx context.Context, fn func(*State) error) error {
+	defer storewatch.Write(s.Store, "")()
+	return s.Store.Update(ctx, fn)
+}
+
+func (s observedStore) ObserveScopeWrites(string) func() bool {
+	return storewatch.Observe(s.Store, "")
+}
+
 type MemoryStore struct {
 	mu    sync.Mutex
 	state State
@@ -95,7 +107,12 @@ func (m *MemoryStore) ReadSnapshot(ctx context.Context) (State, error) {
 	defer m.mu.Unlock()
 	return CloneState(m.state)
 }
+func (m *MemoryStore) ObserveScopeWrites(string) func() bool {
+	return storewatch.Observe(m, "")
+}
+
 func (m *MemoryStore) Update(ctx context.Context, change func(*State) error) error {
+	defer storewatch.Write(m, "")()
 	if err := ctx.Err(); err != nil {
 		return err
 	}

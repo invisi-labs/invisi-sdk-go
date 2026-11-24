@@ -60,12 +60,12 @@ func (p *PreparedTransaction) stage(ctx context.Context, perform func(*Execution
 	l.busy = true
 	l.mu.Unlock()
 	defer func() { l.mu.Lock(); l.busy = false; l.mu.Unlock() }()
-	plan, err := Frozen(p.operation.Plan)
+	plan, err := ClonePlan(p.operation.Plan)
 	if err != nil {
 		return nil, err
 	}
 	session := *p.operation.Runtime
-	next := &Execution{Runtime: &session, Plan: plan, Status: p.operation.Status, Data: append([]byte(nil), p.operation.Data...)}
+	next := &Execution{Runtime: &session, Plan: plan, Status: p.operation.Status, Data: append([]byte(nil), p.operation.Data...), PriorExternalized: p.operation.PriorExternalized}
 	if p.operation.Authorization != nil {
 		w := *p.operation.Authorization
 		next.Authorization = &w
@@ -133,6 +133,7 @@ func (p *PreparedTransaction) ExportTransaction(ctx context.Context) (Transactio
 	if o.Status != "ready" || o.Plan.Target == "noir-recursive" || len(o.Data) == 0 {
 		return TransactionCall{}, errors.New("ready EVM transaction required")
 	}
+	o.PriorExternalized = true
 	return TransactionCall{To: o.Plan.Context.ProtocolAddress, Data: append([]byte(nil), o.Data...), Value: new(big.Int)}, nil
 }
 

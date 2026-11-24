@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/invisi-labs/invisi-sdk-go/rpc/chain"
 )
 
 type preparationRead struct {
@@ -128,6 +129,11 @@ func (s *Runtime) preparationRuntime() *Runtime {
 	next := *s
 	if next.Snapshot != nil {
 		next.Options.Provider = next.Snapshot.Provider(next.Options.Provider)
+		return &next
+	}
+	// Owned HTTP bindings already retain only immutable deployment facts.
+	// Keep their sealed lifetime visible and all mutable preparation reads live.
+	if _, ok := next.Options.Provider.(*chain.HTTPBinding); ok {
 		return &next
 	}
 	if _, ok := next.Options.Provider.(*preparationProvider); !ok {

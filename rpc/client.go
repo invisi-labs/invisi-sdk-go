@@ -10,21 +10,39 @@ import (
 	"time"
 )
 
+// nativeServiceTransport is private so callers cannot replace its transport
+// or install request callbacks. Connections are pooled across default clients.
+var nativeServiceTransport = &http.Transport{
+	Proxy:                 http.ProxyFromEnvironment,
+	ForceAttemptHTTP2:     true,
+	MaxIdleConns:          100,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ExpectContinueTimeout: time.Second,
+}
+
 type ClientOptions struct {
+	// UseNativeHTTPTransport is retained for compatibility: the SDK's fixed
+	// transport is already the default when HTTPClient is nil. Setting it true
+	// together with HTTPClient is an error. Headers are copied at construction.
+	UseNativeHTTPTransport bool
+	// HTTPClient preserves the caller's transport policy, including a nil
+	// Transport using http.DefaultTransport. Its observations are not reusable.
 	HTTPClient *http.Client
 	Headers    http.Header
 	Deployment *ProtocolDeployment
 }
 
 type ProtocolRpcClient struct {
-	url        url.URL
-	http       *http.Client
-	headers    http.Header
-	sequence   atomic.Uint64
-	mu         sync.Mutex
-	deployment *ProtocolDeployment
-	provider   ChainProvider
-	pinned     bool
+	url                url.URL
+	http               *http.Client
+	headers            http.Header
+	sequence           atomic.Uint64
+	deploymentRequests *atomic.Uint64
+	mu                 sync.Mutex
+	deployment         *ProtocolDeployment
+	provider           ChainProvider
+	pinned             bool
 }
 
 func NewProtocolRpcClient(endpoint string, options ...ClientOptions) (*ProtocolRpcClient, error) {
@@ -39,13 +57,16 @@ func NewProtocolRpcClient(endpoint string, options ...ClientOptions) (*ProtocolR
 	if len(options) == 1 {
 		opt = options[0]
 	}
+	if opt.UseNativeHTTPTransport && opt.HTTPClient != nil {
+		return nil, errors.New("native service transport cannot be combined with HTTPClient")
+	}
 	client := opt.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = &http.Client{Timeout: 30 * time.Second, Transport: nativeServiceTransport}
 	}
 	clone := *client
 	clone.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	c := &ProtocolRpcClient{url: *u, http: &clone, headers: opt.Headers.Clone()}
+	c := &ProtocolRpcClient{url: *u, http: &clone, headers: opt.Headers.Clone(), deploymentRequests: new(atomic.Uint64)}
 	if opt.Deployment != nil {
 		if e := opt.Deployment.Validate(); e != nil {
 			return nil, e
@@ -69,7 +90,7 @@ func (c *ProtocolRpcClient) WithProvider(provider ChainProvider) *ProtocolRpcCli
 		copy := cloneDeployment(*c.deployment)
 		d = &copy
 	}
-	return &ProtocolRpcClient{url: c.url, http: c.http, headers: c.headers.Clone(), deployment: d, provider: provider, pinned: c.pinned}
+	return &ProtocolRpcClient{url: c.url, http: c.http, headers: c.headers.Clone(), deployment: d, provider: provider, pinned: c.pinned, deploymentRequests: c.deploymentRequests}
 }
 
 func (c *ProtocolRpcClient) context(context DeploymentContext) (ProtocolDeployment, error) {

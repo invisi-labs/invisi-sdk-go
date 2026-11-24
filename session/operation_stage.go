@@ -20,7 +20,7 @@ func (o *Operation) stage(ctx context.Context, work func(*Operation) error, comm
 	if err := o.checkLease(ctx); err != nil {
 		return nil, err
 	}
-	plan, err := frozen(o.plan)
+	plan, err := transaction.ClonePlan(o.plan)
 	if err != nil {
 		return nil, err
 	}

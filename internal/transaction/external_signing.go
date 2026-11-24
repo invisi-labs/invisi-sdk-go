@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/ethereum/go-ethereum/core/types"
 	"math/big"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -88,8 +89,17 @@ func (p *PreparedTransaction) WithWalletSignature(ctx context.Context, signature
 
 // Funding requests are reconstructed from the Frozen operation and current chain nonce.
 func (o *Execution) FundingRequest(ctx context.Context) (apitypes.TypedData, error) {
+	return o.fundingRequest(ctx, false)
+}
+func (o *Execution) fundingRequest(ctx context.Context, requireLive bool) (apitypes.TypedData, error) {
 	if err := o.CheckLease(ctx); err != nil {
 		return apitypes.TypedData{}, err
+	}
+	if o.quotedBindingRetired() {
+		return apitypes.TypedData{}, errors.New("quoted HTTP binding changed; prepare again")
+	}
+	if len(o.Plan.Funding.Signature) != 0 {
+		return apitypes.TypedData{}, errors.New("funding signature already attached")
 	}
 	if o.Plan.FundingMode != "signature" {
 		return apitypes.TypedData{}, errors.New("operation does not require funding authorization")
@@ -97,7 +107,17 @@ func (o *Execution) FundingRequest(ctx context.Context) (apitypes.TypedData, err
 	if (o.Plan.Kind == "shield" && o.Status != "prepared") || (o.Plan.Kind != "shield" && (o.Status != "proved" || o.Bundle == nil)) {
 		return apitypes.TypedData{}, errors.New("proof must precede funding authorization")
 	}
-	if o.Plan.SubmissionValidation == "required" {
+	if !requireLive && o.localQuotedFunding(ctx) {
+		if err := o.ValidateBroadcasterPlan(); err != nil {
+			return apitypes.TypedData{}, err
+		}
+		now := time.Now().Unix()
+		if now > 0 && (uint64(now) > o.Plan.Deadline || o.Plan.Funding.Deadline == nil || o.Plan.Funding.Deadline.Cmp(big.NewInt(now)) < 0) {
+			return apitypes.TypedData{}, errors.New("funding authorization expired")
+		}
+		return o.FundingTypedData()
+	}
+	if !requireLive && o.Plan.OfflinePreparation() {
 		return o.FundingTypedData()
 	}
 	caller, err := contracts.NewInvisiCoreCaller(o.Plan.Context.ProtocolAddress, o.Runtime.Options.Provider)
@@ -130,7 +150,7 @@ func (o *Execution) FundingRequest(ctx context.Context) (apitypes.TypedData, err
 func (o *Execution) ExportFundingAuthorization(ctx context.Context) (primitives.SigningRequest, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	plan, err := Frozen(o.Plan)
+	plan, err := ClonePlan(o.Plan)
 	if err != nil {
 		return primitives.SigningRequest{}, err
 	}
@@ -159,7 +179,7 @@ func (o *Execution) AttachFunding(ctx context.Context, signature []byte) error {
 		verifier = GethFundingVerifier{Provider: o.Runtime.Options.Provider}
 	}
 	valid := false
-	if o.Plan.SubmissionValidation == "required" {
+	if o.Runtime.Options.FundingVerifier == nil && (o.Plan.OfflinePreparation() || o.localQuotedFunding(ctx)) {
 		digest, _, e := apitypes.TypedDataAndHash(typed)
 		if e != nil {
 			return e
@@ -167,6 +187,7 @@ func (o *Execution) AttachFunding(ctx context.Context, signature []byte) error {
 		owner, ok := RecoverTypedDataSigner(digest, signature)
 		valid = ok && owner == o.Plan.Funding.Payer
 	}
+	usedRemoteVerifier := !valid
 	var errVerify error
 	if !valid {
 		valid, errVerify = verifier.VerifyTypedData(ctx, o.Plan.Funding.Payer, typed, signature)
@@ -202,7 +223,7 @@ func (o *Execution) AttachFunding(ctx context.Context, signature []byte) error {
 		}
 	}
 	// Re-read nonce and deadline after potentially remote ERC-1271 verification.
-	rechecked, err := o.FundingRequest(ctx)
+	rechecked, err := o.fundingRequest(ctx, usedRemoteVerifier)
 	if err != nil {
 		return err
 	}
@@ -223,7 +244,9 @@ func (o *Execution) AttachFunding(ctx context.Context, signature []byte) error {
 			return err
 		}
 	}
-	o.Status = "ready"
+	if !o.requiresSource() {
+		o.Status = "ready"
+	}
 	return o.Persist(ctx, o.Status)
 }
 

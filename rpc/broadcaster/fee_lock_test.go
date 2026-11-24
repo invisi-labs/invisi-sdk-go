@@ -63,6 +63,7 @@ func TestPreparationClientFreezesTicketWithoutMutatingSharedClient(t *testing.T)
 	advertised := true
 	lockedCalls := 0
 	legacyCalls := 0
+	statusCalls, tariffCalls := 0, 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			ID     uint64
@@ -74,13 +75,24 @@ func TestPreparationClientFreezesTicketWithoutMutatingSharedClient(t *testing.T)
 		}
 		var result any
 		switch request.Method {
-		case "broadcaster_getStatus":
+		case "broadcaster_getStatus", "broadcaster_getTokenSupport":
+			if request.Method == "broadcaster_getStatus" {
+				statusCalls++
+			}
 			status := ServiceStatus{APIVersion: "v1", ProtocolVersion: "1", ChainID: trust.ChainID.String(), Protocol: trust.Protocol, Sender: trust.Signer, FeeRecipient: common.HexToAddress(v.Lock.FeeRecipient)}
 			if advertised {
 				status.FeeLock = &FeeLockCapabilities{Version: "1", Model: feeLockModel, Core: true}
 			}
 			result = status
+			if request.Method == "broadcaster_getTokenSupport" {
+				result = struct {
+					ServiceStatus
+					TokenAddress common.Address `json:"tokenAddress"`
+					Supported    bool           `json:"supported"`
+				}{status, common.HexToAddress(v.Lock.Token), true}
+			}
 		case "broadcaster_lockFee":
+			tariffCalls++
 			result = v.SignedFeeLock
 		case "broadcaster_estimateQuote", "broadcaster_getQuote":
 			var params struct{ FeeLock *SignedFeeLock }
@@ -129,10 +141,52 @@ func TestPreparationClientFreezesTicketWithoutMutatingSharedClient(t *testing.T)
 	if legacy != client || lockedCalls != 2 || legacyCalls != 1 {
 		t.Fatalf("isolation/compatibility: %d %d", lockedCalls, legacyCalls)
 	}
+
+	advertised = true
+	initializer, ok := any(client).(tokenSupportInitializer)
+	if !ok {
+		t.Fatal("initializer missing")
+	}
+	if supported, err := initializer.InitializeTokenSupport(context.Background(), common.HexToAddress(v.Lock.Token), trust, func(ctx context.Context) error { return ctx.Err() }); err != nil || !supported {
+		t.Fatal(supported, err)
+	}
+	beforeStatus, beforeTariffs := statusCalls, tariffCalls
+	var initialized *Client
+	for i := 0; i < 2; i++ {
+		initialized, err = client.ForPreparation(context.Background(), data, trust)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if initialized.feeLock == nil {
+			t.Fatal("initialized capability downgraded")
+		}
+	}
+	if statusCalls != beforeStatus || tariffCalls != beforeTariffs+1 {
+		t.Fatalf("status=%d tariff=%d", statusCalls-beforeStatus, tariffCalls-beforeTariffs)
+	}
+	// Live submission checks preserve unchanged capability and remain mandatory.
+	signed := v.Quote
+	signed.Context = &trust
+	if _, err = initialized.SubmissionRequirements(context.Background(), signed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.ForPreparation(context.Background(), data, trust); err != nil {
+		t.Fatal("unchanged live status retired initialization", err)
+	}
+	advertised = false
+	if _, err = initialized.SubmissionRequirements(context.Background(), signed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = initialized.EstimateQuote(context.Background(), data); err == nil {
+		t.Fatal("scoped pricing client ignored shared revocation")
+	}
+	if _, err = client.ForPreparation(context.Background(), data, trust); err == nil {
+		t.Fatal("changed live capability downgraded")
+	}
 }
 
 func TestMalformedAdvertisedFeeLockNeverDowngrades(t *testing.T) {
-	for _, cap := range []string{`null`, `{"version":"1","model":"core-gas-v1.3.4","router":false}`, `{"version":"1","model":"core-gas-v1.3.4","core":null,"router":false}`, `{"version":"1","model":"core-gas-v1.3.4","core":true}`} {
+	for _, cap := range []string{`{"version":"2","model":"core-gas-v1.3.4","core":false,"router":false}`, `{"version":"1","model":"unknown","core":false,"router":false}`, `null`, `{"version":"1","model":"core-gas-v1.3.4","router":false}`, `{"version":"1","model":"core-gas-v1.3.4","core":null,"router":false}`, `{"version":"1","model":"core-gas-v1.3.4","core":true}`} {
 		t.Run(cap, func(t *testing.T) {
 			data, trust, _ := intent(t)
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -141,7 +195,7 @@ func TestMalformedAdvertisedFeeLockNeverDowngrades(t *testing.T) {
 					Method string
 				}
 				_ = json.NewDecoder(r.Body).Decode(&req)
-				if req.Method != "broadcaster_getStatus" {
+				if req.Method != "broadcaster_getStatus" && req.Method != "broadcaster_getTokenSupport" {
 					t.Error("malformed capability continued to", req.Method)
 				}
 				result := map[string]any{"apiVersion": "v1", "protocolVersion": "1", "chainId": trust.ChainID.String(), "protocol": trust.Protocol, "sender": trust.Signer, "feeRecipient": common.HexToAddress("0x33"), "submissionHalted": false, "feeLock": json.RawMessage(cap)}
@@ -155,6 +209,11 @@ func TestMalformedAdvertisedFeeLockNeverDowngrades(t *testing.T) {
 			if _, err = client.ForPreparation(context.Background(), data, trust); err == nil {
 				t.Fatal("malformed advertised capability silently downgraded")
 			}
+			request, _ := DecodeIntent(data)
+			if _, err = client.InitializeTokenSupport(context.Background(), request.Token, trust, func(ctx context.Context) error { return ctx.Err() }); err == nil {
+				t.Fatal("malformed capability initialized downgrade authority")
+			}
+
 		})
 	}
 }

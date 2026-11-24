@@ -32,6 +32,9 @@ func detachedForTest(t *testing.T, o *Operation, state WalletState) *sdk.Prepare
 	runtime.OnInvalidate = nil
 	runtime.OnReprice = nil
 	runtime.OnExternalize = nil
+	runtime.SendGeneration = nil
+	runtime.SendProvider = nil
+	runtime.ObserveSendWrites = nil
 	execution.Runtime = &runtime
 	p, e := transaction.NewDetachedExecution(execution)
 	if e != nil {

@@ -18,17 +18,23 @@ import (
 	"github.com/invisi-labs/invisi-sdk-go/protocol/provenance"
 )
 
+// ErrReprepareRequired means the frozen business plan cannot cover a quoted fee.
+var ErrReprepareRequired = errors.New("prepare again")
+
 type Configuration struct {
 	Endpoint                  string
 	QuoteSigner, FeeRecipient common.Address
 }
 type Options struct{ HTTPClient *http.Client }
 type Client struct {
-	feeLock       *SignedFeeLock
-	feeLockTrust  *Trust
-	configuration Configuration
-	http          *http.Client
-	sequence      atomic.Uint64
+	preparation        *preparationAuthority
+	preparationReceipt *preparationCapability
+	feeLock            *SignedFeeLock
+	feeLockTrust       *Trust
+	feeLockEntry       *preparationFeeLock
+	configuration      Configuration
+	http               *http.Client
+	sequence           atomic.Uint64
 }
 type RPCError struct {
 	Code    int    `json:"code"`
@@ -63,7 +69,9 @@ func NewClient(config Configuration, options ...Options) (*Client, error) {
 		h = &copy
 	}
 	h.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Client{configuration: config, http: h}, nil
+	c := &Client{configuration: config, http: h}
+	c.preparation = &preparationAuthority{owner: c}
+	return c, nil
 }
 func (c *Client) Configuration() Configuration { return c.configuration }
 func (c *Client) call(ctx context.Context, method string, params any, result any) error {
@@ -139,6 +147,7 @@ func (c *Client) EstimateQuote(ctx context.Context, data []byte, schedules ...*S
 	var f Fee
 	e := c.call(ctx, "broadcaster_estimateQuote", p, &f)
 	if e != nil {
+		c.rejectFeeLock(e)
 		return f, e
 	}
 	amount, e := decimal(f.FeeAmount)
@@ -168,6 +177,7 @@ func (c *Client) GetQuote(ctx context.Context, data []byte, trust Trust, schedul
 		return s, e
 	}
 	if e := c.call(ctx, "broadcaster_getQuote", params, &s); e != nil {
+		c.rejectFeeLock(e)
 		return s, e
 	}
 	if !sameSchedule(s.Quote.Schedule, schedules) {

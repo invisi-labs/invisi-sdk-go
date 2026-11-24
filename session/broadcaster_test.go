@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -222,11 +223,31 @@ func TestBroadcasterQuoteFailurePreservesManagedReservations(t *testing.T) {
 		t.Fatal("original mutated")
 	}
 }
+func TestCallerFundingRequiresExplicitBroadcasterPreparation(t *testing.T) {
+	ctx := context.Background()
+	s, token, _ := testSession(t, uint64(time.Now().Unix()))
+	address, _ := s.wallet.GetAddress()
+	op, err := s.PrepareShield(ctx, sdk.ShieldPreparation{TokenAddress: token, Outputs: testOutputs(s, []testPaymentOutput{{To: address, Amount: big.NewInt(30)}}), Funding: sdk.FundingSource{Payer: s.wallet.OwnerAddress(), Amount: big.NewInt(30), Authorization: "caller"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := s.options.Store.ReadSnapshot(ctx, s.scope)
+	c, fees := testBroadcaster(t, op, []int64{5}, false)
+	err = c.Quote(ctx, op, sdk.BroadcasterQuoteOptions{MaxFeeAmount: big.NewInt(10)})
+	if err == nil || !errors.Is(err, sdk.ErrReprepareRequired) || fees.Load() != 0 {
+		t.Fatalf("caller funding was repriced: error=%v estimates=%d", err, fees.Load())
+	}
+	after, _ := s.options.Store.ReadSnapshot(ctx, s.scope)
+	if !reflect.DeepEqual(before.Operations[op.ID()], after.Operations[op.ID()]) {
+		t.Fatal("failed quote changed operation")
+	}
+}
+
 func TestBroadcasterShieldGrossFundingAndDecodedCurrentCalldata(t *testing.T) {
 	ctx := context.Background()
 	s, token, _ := testSession(t, uint64(time.Now().Unix()))
 	address, _ := s.wallet.GetAddress()
-	original, e := s.PrepareShield(ctx, sdk.ShieldPreparation{TokenAddress: token, Outputs: testOutputs(s, []testPaymentOutput{{To: address, Amount: big.NewInt(30)}}), Funding: sdk.FundingSource{Payer: s.wallet.OwnerAddress(), Amount: big.NewInt(30), Authorization: "caller"}})
+	original, e := s.PrepareShield(ctx, sdk.ShieldPreparation{TokenAddress: token, Outputs: testOutputs(s, []testPaymentOutput{{To: address, Amount: big.NewInt(30)}}), Funding: sdk.FundingSource{Payer: s.wallet.OwnerAddress(), Amount: big.NewInt(30), Authorization: "signature"}})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -296,7 +317,7 @@ func TestBroadcasterReadySubmitKeepsUncertainReservations(t *testing.T) {
 	}
 }
 
-func TestBroadcasterPrivateShortfallSelectsAndAtomicallyReservesAnotherNote(t *testing.T) {
+func TestBroadcasterPrivateShortfallRequiresPreparationAndPreservesReservations(t *testing.T) {
 	ctx := context.Background()
 	s, token, _ := testSession(t, uint64(time.Now().Unix()))
 	address, _ := s.wallet.GetAddress()
@@ -327,31 +348,37 @@ func TestBroadcasterPrivateShortfallSelectsAndAtomicallyReservesAnotherNote(t *t
 		t.Fatal("failed quote reserved additional input")
 	}
 	good, _ := testBroadcaster(t, original, []int64{5}, false)
-	next, e := original, good.Quote(ctx, original, sdk.BroadcasterQuoteOptions{MaxFeeAmount: big.NewInt(10)})
-	if e != nil {
-		t.Fatal(e)
-	}
-	if len(next.plan.Inputs) != 2 || next.plan.Outputs[1].Amount.Int64() != 45 {
-		t.Fatal(next.Preview())
+	before := snapshot.Operations[original.ID()]
+	e = good.Quote(ctx, original, sdk.BroadcasterQuoteOptions{MaxFeeAmount: big.NewInt(10)})
+	if e == nil || !errors.Is(e, sdk.ErrReprepareRequired) {
+		t.Fatalf("unexpected private shortfall result %v", e)
 	}
 	snapshot, _ = s.options.Store.ReadSnapshot(ctx, s.scope)
-	if snapshot.Notes[leaf].ReservedBy != original.ID() || len(snapshot.Operations[original.ID()].Inputs) != 2 {
-		t.Fatal("additional input not atomically reserved")
+	if snapshot.Notes[leaf].ReservedBy != "" || !reflect.DeepEqual(before, snapshot.Operations[original.ID()]) {
+		t.Fatal("fee shortfall changed record or additional reservation")
 	}
-	next, e = authorizeForTest(next, ctx)
+	if e = original.Abandon(ctx); e != nil {
+		t.Fatal(e)
+	}
+	budgeted, e := s.PrepareTransfer(ctx, sdk.TransferPreparation{TokenAddress: token, Outputs: testOutputs(s, []testPaymentOutput{{To: address, Amount: big.NewInt(100)}}), Fee: &sdk.Fee{Recipient: common.HexToAddress("0x1234"), Amount: big.NewInt(10)}})
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = next.Prove(ctx); e != nil {
+	preparedInputs := append([]transaction.NoteRecord(nil), budgeted.plan.Inputs...)
+	if e = good.Quote(ctx, budgeted, sdk.BroadcasterQuoteOptions{MaxFeeAmount: big.NewInt(10)}); e != nil {
 		t.Fatal(e)
 	}
+	if len(preparedInputs) != 2 || !reflect.DeepEqual(preparedInputs, budgeted.plan.Inputs) || budgeted.plan.Outputs[1].Amount.Int64() != 45 {
+		t.Fatal("fee-budget preparation failed to preserve both inputs")
+	}
+
 }
 
 func TestBroadcasterDetachedHandleAndPermitCallbackFinalGross(t *testing.T) {
 	ctx := context.Background()
 	s, token, _ := testSession(t, uint64(time.Now().Unix()))
 	address, _ := s.wallet.GetAddress()
-	op, e := s.PrepareShield(ctx, sdk.ShieldPreparation{TokenAddress: token, Outputs: testOutputs(s, []testPaymentOutput{{To: address, Amount: big.NewInt(30)}}), Funding: sdk.FundingSource{Payer: s.wallet.OwnerAddress(), Amount: big.NewInt(30), Authorization: "caller", Permit: &protocol.TokenPermit{Deadline: big.NewInt(time.Now().Unix() + 1000)}}})
+	op, e := s.PrepareShield(ctx, sdk.ShieldPreparation{TokenAddress: token, Outputs: testOutputs(s, []testPaymentOutput{{To: address, Amount: big.NewInt(30)}}), Funding: sdk.FundingSource{Payer: s.wallet.OwnerAddress(), Amount: big.NewInt(30), Authorization: "signature", Permit: &protocol.TokenPermit{Deadline: big.NewInt(time.Now().Unix() + 1000)}}})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -778,5 +805,78 @@ func TestScheduledLostSubmitRetainsScopedHandleAndCancellationAcknowledgement(t 
 		if snapshot.Notes[input.Commitment].ReservedBy == op.ID() {
 			t.Fatal("confirmed cancellation retained reservation")
 		}
+	}
+}
+
+func TestQuoteUsesPreparedFundingWithoutChain(t *testing.T) {
+	for _, nonce := range []int64{0, 17} {
+		t.Run(strconv.FormatInt(nonce, 10), func(t *testing.T) {
+			ctx := context.Background()
+			now := uint64(time.Now().Unix())
+			s, token, _ := testSession(t, now)
+			guard := &offlineProvider{Provider: s.options.Provider}
+			s.options.Provider = guard
+			s.rpc = s.rpc.WithProvider(guard)
+			address, _ := s.wallet.GetAddress()
+			deadline := now + 234
+			op, err := s.PrepareShield(ctx, sdk.ShieldPreparation{TokenAddress: token, Outputs: testOutputs(s, []testPaymentOutput{{To: address, Amount: big.NewInt(30)}}), Funding: sdk.FundingSource{Payer: s.wallet.OwnerAddress(), Amount: big.NewInt(30), SigNonce: big.NewInt(nonce), Deadline: deadline}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c, _ := testBroadcaster(t, op, []int64{5}, false)
+			guard.disabled.Store(true)
+			reads := guard.calls.Load()
+			if err = c.Quote(ctx, op, sdk.BroadcasterQuoteOptions{MaxFeeAmount: big.NewInt(10)}); err != nil {
+				t.Fatal(err)
+			}
+			f := op.plan.Funding
+			if guard.calls.Load() != reads || f.SigNonce.Int64() != nonce || f.Deadline.Uint64() != deadline || f.Payer != s.wallet.OwnerAddress() || f.Amount.Int64() != 35 {
+				t.Fatalf("quote changed prepared funding: %+v", f)
+			}
+		})
+	}
+}
+func TestQuoteRequiresFrozenKeysForRestoredShortChange(t *testing.T) {
+	for _, haveKeys := range []bool{true, false} {
+		t.Run(strconv.FormatBool(haveKeys), func(t *testing.T) {
+			ctx := context.Background()
+			s, token, _ := testSession(t, uint64(time.Now().Unix()))
+			address, _ := s.wallet.GetAddress()
+			op, err := s.PrepareTransfer(ctx, sdk.TransferPreparation{TokenAddress: token, Outputs: testOutputs(s, []testPaymentOutput{{To: address, Amount: big.NewInt(30)}})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := &op.plan.Outputs[1]
+			out.Address = s.wallet.OwnerAddress().Hex()
+			if haveKeys {
+				out.ChangeRecipient = address
+			}
+			if err = op.persist(ctx, "prepared"); err != nil {
+				t.Fatal(err)
+			}
+			op, err = s.Resume(ctx, op.ID())
+			if err != nil {
+				t.Fatal(err)
+			}
+			guard := &offlineProvider{Provider: s.options.Provider}
+			guard.disabled.Store(true)
+			s.options.Provider = guard
+			c, _ := testBroadcaster(t, op, []int64{5}, false)
+			before, _ := s.options.Store.ReadSnapshot(ctx, s.scope)
+			err = c.Quote(ctx, op, sdk.BroadcasterQuoteOptions{MaxFeeAmount: big.NewInt(10)})
+			if guard.calls.Load() != 0 {
+				t.Fatal("quote resolved a recipient on chain")
+			}
+			if haveKeys {
+				if err != nil || op.plan.Outputs[1].Amount.Int64() != 65 {
+					t.Fatal("prepared keys unavailable", err)
+				}
+			} else {
+				after, _ := s.options.Store.ReadSnapshot(ctx, s.scope)
+				if !errors.Is(err, sdk.ErrReprepareRequired) || !reflect.DeepEqual(before.Operations[op.ID()], after.Operations[op.ID()]) {
+					t.Fatal("missing keys changed plan", err)
+				}
+			}
+		})
 	}
 }

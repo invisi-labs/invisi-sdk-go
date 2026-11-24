@@ -12,12 +12,16 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 )
 
 func TestFirstCreditRefusalRollsBackButUncertainReplayRemainsImmutable(t *testing.T) {
 	for _, code := range []int{-32024, -32025, -32026, -32000} {
-		for _, mode := range []string{"first", "replay", "store-failure"} {
+		for _, mode := range []string{"first", "replay", "store-failure", "guard", "lease-change", "policy-change", "worker-during-guard"} {
+			if (mode == "guard" || mode == "lease-change" || mode == "policy-change" || mode == "worker-during-guard") && code != -32024 {
+				continue
+			}
 			replay := mode == "replay"
 			t.Run(big.NewInt(int64(code)).String()+"/"+mode, func(t *testing.T) {
 				ctx := context.Background()
@@ -41,6 +45,7 @@ func TestFirstCreditRefusalRollsBackButUncertainReplayRemainsImmutable(t *testin
 				key, _ := crypto.ToECDSA(common.LeftPadBytes([]byte{9}, 32))
 				signer := crypto.PubkeyToAddress(key.PublicKey)
 				collector := common.HexToAddress("0x1234")
+				var wire atomic.Int64
 				server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					var req struct {
 						ID     uint64
@@ -62,9 +67,15 @@ func TestFirstCreditRefusalRollsBackButUncertainReplayRemainsImmutable(t *testin
 						digest, _, _ := apitypes.TypedDataAndHash(typed)
 						sig, _ := crypto.Sign(digest, key)
 						result = broadcaster.SignedQuote{Quote: q, Signature: "0x" + common.Bytes2Hex(sig)}
-					case "broadcaster_getStatus":
-						result = map[string]any{"apiVersion": "v1", "protocolVersion": "1", "chainId": "1", "protocol": common.BigToAddress(big.NewInt(17)), "sender": signer, "feeRecipient": collector}
+					case "broadcaster_getStatus", "broadcaster_getTokenSupport":
+						value := map[string]any{"apiVersion": "v1", "protocolVersion": "1", "chainId": "1", "protocol": common.BigToAddress(big.NewInt(17)), "sender": signer, "feeRecipient": collector}
+						if req.Method == "broadcaster_getTokenSupport" {
+							value["supported"] = true
+							value["tokenAddress"] = common.BigToAddress(big.NewInt(34))
+						}
+						result = value
 					case "broadcaster_submitTransaction":
+						wire.Add(1)
 						reason := map[int]string{-32024: "CREDIT_PERIOD_CHANGED", -32025: "INSUFFICIENT_EXECUTION_SLACK", -32026: "CREDIT_PERIOD_ENDING", -32000: "CREDIT_PERIOD_CHANGED"}[code]
 						json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": code, "message": reason + ": refused"}})
 						return
@@ -78,10 +89,17 @@ func TestFirstCreditRefusalRollsBackButUncertainReplayRemainsImmutable(t *testin
 				if e != nil {
 					t.Fatal(e)
 				}
+				if mode == "policy-change" {
+					ok, err := client.InitializeTokenSupport(ctx, common.BigToAddress(big.NewInt(34)), broadcaster.Trust{ChainID: big.NewInt(1), Protocol: common.BigToAddress(big.NewInt(17)), Signer: signer}, func(ctx context.Context) error { return ctx.Err() })
+					if err != nil || !ok {
+						t.Fatal("initialize policy retirement fixture", err)
+					}
+				}
 				if e = client.Quote(ctx, op, broadcaster.QuoteOptions{MaxFeeAmount: big.NewInt(2)}); e != nil {
 					t.Fatal(e)
 				}
-				if e = op.WithRevocationSignature(ctx, make([]byte, 65), func(context.Context, common.Address, apitypes.TypedData, []byte) (bool, error) { return true, nil }); e != nil {
+				verify := func(context.Context, common.Address, apitypes.TypedData, []byte) (bool, error) { return true, nil }
+				if e = op.WithRevocationSignature(ctx, make([]byte, 65), verify); e != nil {
 					t.Fatal(e)
 				}
 				if replay {
@@ -106,6 +124,94 @@ func TestFirstCreditRefusalRollsBackButUncertainReplayRemainsImmutable(t *testin
 				}
 				if mode == "store-failure" {
 					managed.store = refusalPersistenceFailure{store}
+				}
+				if mode == "lease-change" || mode == "policy-change" || mode == "worker-during-guard" {
+					var changed atomic.Bool
+					started, release := make(chan struct{}), make(chan struct{})
+					if mode == "lease-change" {
+						managed.store = frozenReadChangeStore{Store: store, id: op.id, changed: &changed}
+					}
+					managed.captureSendGuard = func(context.Context, string, string) (func(context.Context) error, error) {
+						return func(ctx context.Context) error {
+							if mode == "policy-change" {
+								close(started)
+								<-release
+							}
+							if mode == "worker-during-guard" {
+								return store.Update(ctx, func(st *State) error {
+									j := st.Operations[op.id]
+									j.WorkerID = "replacement"
+									st.Operations[op.id] = j
+									return nil
+								})
+							}
+							if changed.Load() {
+								return errors.New("provider changed during post-freeze lease read")
+							}
+							return nil
+						}, nil
+					}
+					if mode == "policy-change" {
+						done := make(chan error, 1)
+						go func() { _, err := client.Submit(ctx, op); done <- err }()
+						select {
+						case <-started:
+						case err := <-done:
+							t.Fatalf("submission ended before final guard: %v", err)
+						}
+						// Refresh retirement takes effect even when the replacement fails.
+						_, _ = client.InitializeTokenSupport(ctx, common.Address{}, broadcaster.Trust{}, nil)
+						close(release)
+						e = <-done
+					} else {
+						_, e = client.Submit(ctx, op)
+					}
+					if e == nil || wire.Load() != 0 {
+						t.Fatalf("first Credit send crossed %s: writes=%d error=%v", mode, wire.Load(), e)
+					}
+					st, _ := store.ReadSnapshot(ctx)
+					j := st.Operations[op.id]
+					if !j.Externalized || j.BroadcasterRequest == nil || st.Grants[g.key()].ReservedBy != op.id {
+						t.Fatal("guard failure lost frozen authority")
+					}
+					if mode == "worker-during-guard" {
+						managed.verifyRevocation = verify
+						op, e = managed.Resume(ctx, op.id, nil)
+						if e != nil {
+							t.Fatal(e)
+						}
+					}
+					if _, e = client.Submit(ctx, op); e == nil || wire.Load() != 1 {
+						t.Fatal("expected refused replay of the untouched request", e)
+					}
+					return
+				}
+				if mode == "guard" {
+					denied := errors.New("Credit network changed after freezing")
+					managed.captureSendGuard = func(context.Context, string, string) (func(context.Context) error, error) {
+						return func(ctx context.Context) error {
+							state, err := store.ReadSnapshot(ctx)
+							if err != nil {
+								return err
+							}
+							j := state.Operations[op.id]
+							if j.BroadcasterRequest == nil || !j.Externalized || j.Status != "uncertain" {
+								t.Fatal("send guard ran before durable packet")
+							}
+							return denied
+						}, nil
+					}
+					if _, e = client.Submit(ctx, op); !errors.Is(e, denied) || wire.Load() != 0 {
+						t.Fatal("first Credit send bypassed guard", e)
+					}
+					if _, e = client.Submit(ctx, op); e == nil || wire.Load() != 1 {
+						t.Fatal("frozen Credit replay did not reach original client", e)
+					}
+					state, _ := store.ReadSnapshot(ctx)
+					if !state.Operations[op.id].Externalized || state.Operations[op.id].BroadcasterRequest == nil {
+						t.Fatal("refused replay discarded attempt")
+					}
+					return
 				}
 				_, e = client.Submit(ctx, op)
 				if e == nil {
@@ -175,4 +281,18 @@ func (s refusalPersistenceFailure) Update(ctx context.Context, f func(*State) er
 		}
 		return nil
 	})
+}
+
+type frozenReadChangeStore struct {
+	Store
+	id      string
+	changed *atomic.Bool
+}
+
+func (s frozenReadChangeStore) ReadSnapshot(ctx context.Context) (State, error) {
+	state, err := s.Store.ReadSnapshot(ctx)
+	if err == nil && state.Operations[s.id].BroadcasterRequest != nil {
+		s.changed.Store(true)
+	}
+	return state, err
 }

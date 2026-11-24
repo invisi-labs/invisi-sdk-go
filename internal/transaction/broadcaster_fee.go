@@ -3,6 +3,8 @@ package transaction
 import (
 	"context"
 	"errors"
+	"fmt"
+	"github.com/invisi-labs/invisi-sdk-go/rpc/broadcaster"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -74,19 +76,11 @@ func (o *Execution) ApplyBroadcasterFee(ctx context.Context, base Plan, recipien
 	_, previousFee := PlanFee(base)
 	requestedFee := new(big.Int).Set(fee)
 	fee = new(big.Int).Sub(fee, previousFee)
-	if fee.Sign() > 0 && base.Kind != "shield" && opt.FeeSource != BroadcasterFeePublicFunding && (base.Funding.Amount == nil || base.Funding.Amount.Sign() == 0 || opt.FeeSource == BroadcasterFeePrivateInputs) {
-		var err error
-		base, err = o.ExtendBroadcasterInputs(ctx, base, fee)
-		if err != nil {
-			return err
-		}
-	}
 	p, e := ClonePlan(base)
 	if e != nil {
 		return e
 	}
-	o.Plan = p
-	SetPlanFee(&o.Plan, recipient, requestedFee)
+	SetPlanFee(&p, recipient, requestedFee)
 
 	if fee.Sign() < 0 && p.Kind == "transact" && opt.FeeSource != BroadcasterFeePublicFunding {
 		hasChange := false
@@ -101,8 +95,12 @@ func (o *Execution) ApplyBroadcasterFee(ctx context.Context, base Plan, recipien
 			if e != nil {
 				return e
 			}
-			if o.Runtime.ChangeAddress != "" {
-				address = o.Runtime.ChangeAddress
+			if p.ChangeAddress != "" {
+				address = p.ChangeAddress
+			}
+			decoded, e := primitives.DecodeAddress(address)
+			if e != nil || decoded.Kind != "long" {
+				return fmt.Errorf("%w with resolved change recipient", broadcaster.ErrReprepareRequired)
 			}
 			out, e := o.Runtime.ChangeOutput(ctx, p.Context.TokenAddress, address, new(big.Int).Neg(fee))
 			if e != nil {
@@ -110,7 +108,6 @@ func (o *Execution) ApplyBroadcasterFee(ctx context.Context, base Plan, recipien
 			}
 			out.Change = true
 			p.Outputs = append(p.Outputs, out)
-			o.Plan.Outputs = append(o.Plan.Outputs, out)
 			fee = new(big.Int)
 		}
 	}
@@ -125,29 +122,26 @@ func (o *Execution) ApplyBroadcasterFee(ctx context.Context, base Plan, recipien
 		change = -1
 	}
 	if change < 0 && fee.Sign() == 0 {
-		if p.Funding.Amount.Sign() > 0 && p.FundingMode != "signature" {
-			source := FundingSource{Payer: p.Funding.Payer, Amount: new(big.Int).Set(p.Funding.Amount), Authorization: "signature"}
-			if p.Funding.Permit.Deadline != nil && p.Funding.Permit.Deadline.Sign() > 0 {
-				source.Permit = &p.Funding.Permit
-			}
-			o.Plan.Funding, o.Plan.FundingMode, e = o.Runtime.Funding(ctx, &source, p.Block, p.Deadline)
-			if e != nil {
-				return e
-			}
-		}
+		o.Plan = p
 		return nil
 	}
-	if change < 0 && opt.FeeSource == BroadcasterFeePrivateInputs {
-		return errors.New("insufficient existing private change for fee")
+	if change < 0 && opt.FeeSource == BroadcasterFeePublicFunding && p.Funding.Amount.Sign() == 0 {
+		return fmt.Errorf("%w with signature funding to pay the broadcaster fee", broadcaster.ErrReprepareRequired)
+	}
+	if change < 0 && (opt.FeeSource == BroadcasterFeePrivateInputs || p.Funding.Amount.Sign() == 0) {
+		return fmt.Errorf("%w with sufficient private inputs for the broadcaster fee", broadcaster.ErrReprepareRequired)
 	}
 	if change >= 0 {
-		out := o.Plan.Outputs[change]
+		out := p.Outputs[change]
 		amount := new(big.Int).Sub(out.Amount, fee)
 		if amount.Sign() == 0 {
-			o.Plan.Outputs = append(o.Plan.Outputs[:change], o.Plan.Outputs[change+1:]...)
-		} else {
+			p.Outputs = append(p.Outputs[:change], p.Outputs[change+1:]...)
+		} else if fee.Sign() != 0 {
+			if e = Positive(amount, 128); e != nil {
+				return e
+			}
 			if out.Note == nil {
-				return errors.New("missing private change note")
+				return fmt.Errorf("%w with a private change opening", broadcaster.ErrReprepareRequired)
 			}
 			note := *out.Note
 			note.Amount = primitives.BigIntToElement(amount)
@@ -155,11 +149,15 @@ func (o *Execution) ApplyBroadcasterFee(ctx context.Context, base Plan, recipien
 			if e != nil {
 				return e
 			}
-			recipient, e := o.Runtime.ResolveRecipient(ctx, out.Address)
-			if e != nil {
-				return e
+			address := out.Address
+			if out.ChangeRecipient != "" {
+				address = out.ChangeRecipient
 			}
-			delivery, e := EncryptOutput(recipient, note, FieldHash(commit))
+			recipient, e := primitives.DecodeAddress(address)
+			if e != nil || recipient.Kind != "long" || recipient.OwnerAddress != note.OwnerAddress {
+				return fmt.Errorf("%w with resolved change recipient keys", broadcaster.ErrReprepareRequired)
+			}
+			delivery, e := EncryptOutput(recipient.ReceivingAddress, note, FieldHash(commit))
 			if e != nil {
 				return e
 			}
@@ -167,29 +165,20 @@ func (o *Execution) ApplyBroadcasterFee(ctx context.Context, base Plan, recipien
 			out.Amount = amount
 			out.Commitment = FieldHash(commit)
 			out.Delivery = delivery
-			o.Plan.Outputs[change] = out
+			p.Outputs[change] = out
 		}
 		if p.Kind == "transact" {
-			o.Plan.Params.NoteCommitments = nil
-			for _, out := range o.Plan.Outputs {
-				o.Plan.Params.NoteCommitments = append(o.Plan.Params.NoteCommitments, out.Commitment)
+			p.Params.NoteCommitments = nil
+			for _, out := range p.Outputs {
+				p.Params.NoteCommitments = append(p.Params.NoteCommitments, out.Commitment)
 			}
-			o.Plan.Capacity, e = protocol.SelectTransactCapacity(len(p.Inputs), len(o.Plan.Outputs))
+			p.Capacity, e = protocol.SelectTransactCapacity(len(p.Inputs), len(p.Outputs))
 			if e != nil {
 				return e
 			}
 		}
-		o.Plan.NeedsAuthorization = len(o.Plan.Inputs) > 0 || p.Kind != "transact"
-		if p.Funding.Amount.Sign() > 0 && p.FundingMode != "signature" {
-			source := FundingSource{Payer: p.Funding.Payer, Amount: new(big.Int).Set(p.Funding.Amount), Authorization: "signature"}
-			if p.Funding.Permit.Deadline != nil && p.Funding.Permit.Deadline.Sign() > 0 {
-				source.Permit = &p.Funding.Permit
-			}
-			o.Plan.Funding, o.Plan.FundingMode, e = o.Runtime.Funding(ctx, &source, p.Block, p.Deadline)
-			if e != nil {
-				return e
-			}
-		}
+		p.NeedsAuthorization = len(p.Inputs) > 0 || p.Kind != "transact"
+		o.Plan = p
 		return nil
 	}
 	gross := new(big.Int).Add(p.Funding.Amount, fee)
@@ -200,17 +189,20 @@ func (o *Execution) ApplyBroadcasterFee(ctx context.Context, base Plan, recipien
 	if payer == (common.Address{}) {
 		return errors.New("public funding fee requires an explicit payer")
 	}
-	source := FundingSource{Payer: payer, Amount: gross, Authorization: "signature", Deadline: p.Deadline}
-	if p.FundingMode == "signature" {
-		source.SigNonce = p.Funding.SigNonce
-		if p.Funding.Deadline != nil {
-			source.Deadline = p.Funding.Deadline.Uint64()
+	if p.FundingMode != "signature" || p.Funding.SigNonce == nil || p.Funding.Deadline == nil {
+		return fmt.Errorf("%w with signature funding", broadcaster.ErrReprepareRequired)
+	}
+	if p.Funding.Permit.Deadline != nil && p.Funding.Permit.Deadline.Sign() > 0 {
+		if opt.FundingPermit == nil {
+			return fmt.Errorf("%w with a fresh token permit callback for gross funding", broadcaster.ErrReprepareRequired)
 		}
+		p.Funding.Permit = protocol.TokenPermit{}
 	}
-	if p.Funding.Permit.Deadline != nil && p.Funding.Permit.Deadline.Sign() > 0 && opt.FundingPermit == nil {
-		return errors.New("gross funding requires a fresh token permit callback")
+	p.Funding.Amount = gross
+	p.Funding, e = protocol.NormalizeFunding(p.Funding)
+	if e != nil {
+		return e
 	}
-
-	o.Plan.Funding, o.Plan.FundingMode, e = o.Runtime.Funding(ctx, &source, p.Block, p.Deadline)
-	return e
+	o.Plan = p
+	return nil
 }

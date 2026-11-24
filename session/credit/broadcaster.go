@@ -7,6 +7,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/invisi-labs/invisi-sdk-go/credit"
+	"github.com/invisi-labs/invisi-sdk-go/internal/storewatch"
 	"github.com/invisi-labs/invisi-sdk-go/primitives"
 	"github.com/invisi-labs/invisi-sdk-go/rpc/broadcaster"
 )
@@ -14,7 +15,7 @@ import (
 func (o *Operation) quoteBroadcaster(ctx context.Context, client *broadcaster.Client, options credit.BroadcasterQuoteOptions) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if err := o.checkFresh(ctx); err != nil {
+	if err := o.checkPreparation(ctx, false); err != nil {
 		return err
 	}
 	before, err := o.prepared.ExportIntent()
@@ -110,6 +111,17 @@ func (o *Operation) submitViaBroadcaster(ctx context.Context, client *broadcaste
 		}
 		return o.finishTerminalBroadcaster(ctx, status)
 	}
+	if client == nil {
+		return broadcaster.Status{}, errors.New("selected broadcaster required")
+	}
+	policyGuard := client.SubmissionPolicyGuard()
+	var sessionGuard func(context.Context) error
+	if o.session.captureSendGuard != nil {
+		sessionGuard, err = o.session.captureSendGuard(ctx, o.id, o.worker)
+		if err != nil {
+			return broadcaster.Status{}, err
+		}
+	}
 	if err := o.validateSubmission(ctx); err != nil {
 		return broadcaster.Status{}, err
 	}
@@ -137,6 +149,21 @@ func (o *Operation) submitViaBroadcaster(ctx context.Context, client *broadcaste
 		record.Status = "uncertain"
 		return nil
 	}); err != nil {
+		return broadcaster.Status{}, err
+	}
+	finish := storewatch.ObserveStore(o.session.store, "")
+	err = storewatch.Check(finish, func() error {
+		return policyGuard(ctx, func(ctx context.Context) error {
+			if err := o.check(ctx); err != nil {
+				return err
+			}
+			if sessionGuard != nil {
+				return sessionGuard(ctx)
+			}
+			return ctx.Err()
+		})
+	})
+	if err != nil {
 		return broadcaster.Status{}, err
 	}
 	status, err := client.SubmitPrepared(ctx, request)

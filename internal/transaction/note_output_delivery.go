@@ -50,13 +50,25 @@ func (s *Runtime) Output(ctx context.Context, token common.Address, n NoteOutput
 }
 
 func (s *Runtime) ChangeOutput(ctx context.Context, token common.Address, address string, amount *big.Int) (PreparedOutput, error) {
-	var r NoteRecipient = InvisiRecipient{Address: address}
+	resolved := address
 	if common.IsHexAddress(address) {
-		r = EVMRecipient{Address: common.HexToAddress(address)}
+		recipient, err := s.ResolveRecipient(ctx, address)
+		if err != nil {
+			return PreparedOutput{}, err
+		}
+		resolved, err = primitives.EncodeLongAddress(recipient)
+		if err != nil {
+			return PreparedOutput{}, err
+		}
 	}
-	n, e := NewNoteOutput(PaymentRequest{ChainID: primitives.ElementToBigInt(s.CoreContext().ChainID), ProtocolAddress: s.Scope.ProtocolAddress, TokenAddress: token, Amount: amount, Recipient: r})
+	n, e := NewNoteOutput(PaymentRequest{ChainID: primitives.ElementToBigInt(s.CoreContext().ChainID), ProtocolAddress: s.Scope.ProtocolAddress, TokenAddress: token, Amount: amount, Recipient: InvisiRecipient{Address: resolved}})
 	if e != nil {
 		return PreparedOutput{}, e
 	}
-	return s.Output(ctx, token, n)
+	out, e := s.Output(ctx, token, n)
+	if resolved != address {
+		out.ChangeRecipient = resolved
+		out.Address = address
+	}
+	return out, e
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
+	"github.com/invisi-labs/invisi-sdk-go/credit"
 	"github.com/invisi-labs/invisi-sdk-go/primitives"
 	"github.com/invisi-labs/invisi-sdk-go/rpc/broadcaster"
 )
@@ -130,6 +131,7 @@ func TestClientQuoteManagedCreditRollbackAndResume(t *testing.T) {
 	if err = client.Quote(ctx, original, options); err == nil || calls != before {
 		t.Fatal("stale worker reached quote", err)
 	}
+	managed.validate = func(context.Context, credit.Intent) error { return errors.New("quote revalidated current chain") }
 	if err = client.Quote(ctx, resumed, options); err != nil {
 		t.Fatal(err)
 	}

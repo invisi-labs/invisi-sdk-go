@@ -77,6 +77,8 @@ type PreparationInput struct {
 
 // PreparationBuilder resolves current or pinned facts; authorization stays with the application.
 type PreparationBuilder struct {
+	// CaptureSendNetwork binds a first relay send to the live provider when one is available.
+	CaptureSendNetwork func() func(context.Context) error
 	// ChainTimestamp reads fresh canonical chain time for first submission.
 	ChainTimestamp func(context.Context) (uint64, error)
 	Frame          func(context.Context, common.Address, uint64) (Context, uint64, error)
@@ -120,12 +122,14 @@ func Seal(d DeliveryState) ([]protocol.Delivery, error) {
 	}
 	return ds, nil
 }
+func (b PreparationBuilder) attachSendCapabilities(prepared *Prepared) {
+	if prepared != nil {
+		prepared.chainTimestamp = b.ChainTimestamp
+		prepared.captureSendNetwork = b.CaptureSendNetwork
+	}
+}
 func (b PreparationBuilder) Create(ctx context.Context, p CreatePreparation) (prepared *Prepared, err error) {
-	defer func() {
-		if prepared != nil {
-			prepared.SetChainTimestampReader(b.ChainTimestamp)
-		}
-	}()
+	defer func() { b.attachSendCapabilities(prepared) }()
 	p = p.Clone()
 	if p.CreationABI != "" && p.CreationABI != "legacy" && p.CreationABI != "initial-payment" {
 		return nil, fmt.Errorf("unsupported creation ABI")
@@ -273,7 +277,8 @@ func (b PreparationBuilder) Create(ctx context.Context, p CreatePreparation) (pr
 	}
 	return PrepareCreate(c, params, ds, state)
 }
-func (b PreparationBuilder) Update(ctx context.Context, p UpdatePreparation) (*Prepared, error) {
+func (b PreparationBuilder) Update(ctx context.Context, p UpdatePreparation) (prepared *Prepared, err error) {
+	defer func() { b.attachSendCapabilities(prepared) }()
 	p = p.Clone()
 	c, deadline, err := b.Frame(ctx, p.TokenAddress, p.Deadline)
 	if err != nil {
@@ -301,7 +306,8 @@ func (b PreparationBuilder) Update(ctx context.Context, p UpdatePreparation) (*P
 	s := input.Located.State
 	return PrepareUpdate(c, UpdateParams{Token: p.TokenAddress, Owner: common.BigToAddress(primitives.ElementToBigInt(s.OwnerWalletIdentity)), Source: input.Source, Nullifier: common.Hash(next.Nullifier.Bytes()), CreditCommitment: common.Hash(next.StateCommitment.Bytes()), GrantID: primitives.ElementToBigInt(s.GrantID), Deadline: new(big.Int).SetUint64(deadline), FeeRecipient: r, FeeAmount: f}, ds, input.Located, change)
 }
-func (b PreparationBuilder) Revoke(ctx context.Context, p RevokePreparation) (*Prepared, error) {
+func (b PreparationBuilder) Revoke(ctx context.Context, p RevokePreparation) (prepared *Prepared, err error) {
+	defer func() { b.attachSendCapabilities(prepared) }()
 	p = p.Clone()
 	c, deadline, err := b.Frame(ctx, p.TokenAddress, p.Deadline)
 	if err != nil {
@@ -342,11 +348,7 @@ func (b PreparationBuilder) Revoke(ctx context.Context, p RevokePreparation) (*P
 	return PrepareRevoke(c, RevokeParams{Token: p.TokenAddress, Owner: owner, GrantID: p.GrantID, Deadline: new(big.Int).SetUint64(deadline), FeeRecipient: r, FeeAmount: f})
 }
 func (b PreparationBuilder) Draw(ctx context.Context, p DrawPreparation) (prepared *Prepared, err error) {
-	defer func() {
-		if prepared != nil {
-			prepared.SetChainTimestampReader(b.ChainTimestamp)
-		}
-	}()
+	defer func() { b.attachSendCapabilities(prepared) }()
 	p = p.Clone()
 	c, deadline, err := b.Frame(ctx, p.TokenAddress, p.Deadline)
 	if err != nil {

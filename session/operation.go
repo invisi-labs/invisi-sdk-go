@@ -27,6 +27,12 @@ func (o *Operation) persist(ctx context.Context, status string) error {
 		if record.WorkerID != o.workerID {
 			return errors.New("operation worker was replaced; resume operation")
 		}
+		if status == "ready" && o.plan.Broadcaster != nil && o.plan.Broadcaster.SubmissionRefusal != "" {
+			if o.plan.Broadcaster.Request != nil || o.plan.Broadcaster.RequestID != "" || record.TransactionHash != (common.Hash{}) || o.transactionHash != (common.Hash{}) {
+				return errors.New("submission changed before refusal persistence")
+			}
+			record.Externalized = false
+		}
 		record.Status = status
 		if status == "uncertain" {
 			record.Externalized = true

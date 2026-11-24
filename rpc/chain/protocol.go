@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"reflect"
+	"sync"
 
 	"github.com/invisi-labs/invisi-sdk-go/protocol"
 
@@ -16,9 +18,14 @@ import (
 
 // Protocol describes one multi-token deployment and optional public connections. It owns no wallet keys.
 type Protocol struct {
-	deployment protocolrpc.ProtocolDeployment
-	rpc        *protocolrpc.ProtocolRpcClient
-	provider   protocolrpc.ChainProvider
+	deployment     protocolrpc.ProtocolDeployment
+	rpc            *protocolrpc.ProtocolRpcClient
+	provider       protocolrpc.ChainProvider
+	receiptMu      sync.Mutex
+	receiptBinding *HTTPBinding
+	receiptEpoch   uint64
+	discoveryMu    sync.Mutex
+	discovery      map[common.Address]*initializedBroadcasters
 }
 
 func NewProtocol(deployment protocolrpc.ProtocolDeployment) (*Protocol, error) {
@@ -81,13 +88,26 @@ func (p *Protocol) ValidateDeployment(ctx context.Context, provider protocolrpc.
 	if provider == nil {
 		return errors.New("Chain RPC provider required")
 	}
-	chain, e := provider.ChainID(ctx)
-	if e != nil {
+	binding, _ := provider.(*HTTPBinding)
+	var epoch uint64
+	if binding != nil {
+		epoch = binding.Epoch()
+	}
+	if e := p.ValidateNetwork(ctx, provider); e != nil {
 		return e
 	}
-	expected, _ := p.deployment.ChainNumber()
-	if chain.Cmp(expected) != 0 {
-		return errors.New("deployment chain mismatch")
+	if binding != nil {
+		if e := binding.current(ctx, epoch); e != nil {
+			return e
+		}
+		p.receiptMu.Lock()
+		defer p.receiptMu.Unlock()
+		if e := binding.current(ctx, epoch); e != nil {
+			return e
+		}
+		if p.receiptBinding == binding && p.receiptEpoch == epoch {
+			return binding.current(ctx, epoch)
+		}
 	}
 	code, e := provider.CodeAt(ctx, p.deployment.Protocol.Address, nil)
 	if e != nil {
@@ -114,7 +134,103 @@ func (p *Protocol) ValidateDeployment(ctx context.Context, provider protocolrpc.
 			return errors.New("registry differs from immutable protocol binding")
 		}
 	}
+	if binding != nil {
+		if err := binding.current(ctx, epoch); err != nil {
+			return err
+		}
+		p.receiptBinding = binding
+		p.receiptEpoch = epoch
+		return binding.current(ctx, epoch)
+	}
 	return nil
+}
+
+// ValidateNetwork always reads the current network, including when immutable
+// deployment facts have a successful receipt for this owned HTTP epoch.
+func (p *Protocol) ValidateNetwork(ctx context.Context, provider protocolrpc.ChainProvider) error {
+	if provider == nil {
+		return errors.New("Chain RPC provider required")
+	}
+	binding, _ := provider.(*HTTPBinding)
+	var epoch uint64
+	if binding != nil {
+		epoch = binding.Epoch()
+	}
+	chain, e := provider.ChainID(ctx)
+	if e != nil {
+		return e
+	}
+	if binding != nil {
+		if e = binding.current(ctx, epoch); e != nil {
+			return e
+		}
+	}
+	expected, _ := p.deployment.ChainNumber()
+	if chain == nil || chain.Cmp(expected) != 0 {
+		if binding != nil {
+			binding.epoch.CompareAndSwap(epoch, epoch+1)
+		}
+		return errors.New("deployment chain mismatch")
+	}
+	return nil
+}
+
+// CaptureSendNetwork captures the live provider epoch for one first send. The
+// returned check observes the real network after the signed request is frozen.
+func (p *Protocol) CaptureSendNetwork(provider func() protocolrpc.ChainProvider) func(context.Context) error {
+	original := provider()
+	comparable := original != nil && reflect.ValueOf(original).Comparable()
+	binding, _ := original.(*HTTPBinding)
+	var epoch uint64
+	if binding != nil {
+		epoch = binding.Epoch()
+	}
+	return func(ctx context.Context) error {
+		current := provider()
+		if err := p.ValidateNetwork(ctx, current); err != nil {
+			return err
+		}
+		if comparable && (current != original || provider() != original) {
+			return errors.New("submission provider changed")
+		}
+		if binding != nil {
+			return binding.current(ctx, epoch)
+		}
+		return ctx.Err()
+	}
+}
+
+// ReadAuthorizationNonce is an explicit lightweight prerequisite. It reads the
+// latest nonce with network identity and never changes historical snapshot APIs.
+func (p *Protocol) ReadAuthorizationNonce(ctx context.Context, provider protocolrpc.ChainProvider, payer common.Address) (*big.Int, error) {
+	if payer == (common.Address{}) {
+		return nil, errors.New("funding payer required")
+	}
+	binding, _ := provider.(*HTTPBinding)
+	var epoch uint64
+	if binding != nil {
+		epoch = binding.Epoch()
+	}
+	if err := p.ValidateNetwork(ctx, provider); err != nil {
+		return nil, err
+	}
+	data := append(crypto.Keccak256([]byte("nonces(address)"))[:4], common.LeftPadBytes(payer.Bytes(), 32)...)
+	out, err := provider.CallContract(ctx, ethereum.CallMsg{To: &p.deployment.Protocol.Address, Data: data}, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
+	if binding != nil {
+		if err = binding.current(ctx, epoch); err != nil {
+			return nil, err
+		}
+	}
+	if len(out) != 32 {
+		return nil, errors.New("invalid authorization nonce response")
+	}
+	return new(big.Int).SetBytes(out), nil
 }
 func (p *Protocol) ForToken(token common.Address) (protocol.TransactionContext, error) {
 	if token == (common.Address{}) {

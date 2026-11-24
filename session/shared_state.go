@@ -146,6 +146,10 @@ func (s *WalletSession) RefreshState(ctx context.Context) error {
 // RefreshStateWithOptions optionally omits transaction-material preloading while
 // preserving the same live state, deployment and recovery checks.
 func (s *WalletSession) RefreshStateWithOptions(ctx context.Context, options StateRefreshOptions) error {
+	return s.refreshState(ctx, options, s.beginShieldCapture())
+}
+
+func (s *WalletSession) refreshState(ctx context.Context, options StateRefreshOptions, ticket *shieldPreparationAnchor) error {
 	inventoryOnly := options.InventoryOnly
 	// A final live refresh must recapture all consumption/revocation reads in its
 	// preparation snapshot and must not reuse the discovery scan's state cache.
@@ -173,6 +177,7 @@ func (s *WalletSession) RefreshStateWithOptions(ctx context.Context, options Sta
 	if before.Invalidated {
 		return errors.New("wallet requires reset scan")
 	}
+	priorObserved, priorChecked := before.ObservedThrough, before.CheckedThrough
 	priorAnchors := []protocolrpc.CanonicalBlock{}
 	if inventoryOnly {
 		for _, point := range []*protocolrpc.CanonicalBlock{before.ObservedThrough, before.CheckedThrough} {
@@ -189,7 +194,7 @@ func (s *WalletSession) RefreshStateWithOptions(ctx context.Context, options Sta
 		}
 	}
 	snap := newPreparationSnapshot(s, before, b, head)
-	recorder := transaction.NewSnapshotRecorder(s.options.Provider, snap)
+	recorder := transaction.NewSnapshotRecorder(s.options.Provider, snap, s.protocol)
 	captured := *s
 	captured.options.Provider = recorder
 	if e = s.protocol.ValidateDeployment(ctx, recorder); e != nil {
@@ -217,6 +222,32 @@ func (s *WalletSession) RefreshStateWithOptions(ctx context.Context, options Sta
 			}
 		}
 	}
+	var tokens map[common.Address]common.Hash
+	var service *protocolrpc.DeploymentObservation
+	if ticket != nil && ticket.binding != nil && !inventoryOnly {
+		if e = verifyShieldCheckpoints(ctx, recorder, priorObserved, priorChecked); e != nil {
+			return e
+		}
+	}
+	if ticket != nil && ticket.binding != nil && !inventoryOnly && s.shieldPreparations.Load() == ticket {
+		// Only this refresh's real native capture supplies token and header facts.
+		tokens = make(map[common.Address]common.Hash)
+		for token, code := range snap.Code {
+			if token != s.scope.ProtocolAddress && len(code) > 0 {
+				tokens[token] = transaction.HashCode(code)
+			}
+		}
+		if len(tokens) > 0 {
+			service, e = s.shieldCaptureService(ctx, ticket, false)
+			if errors.Is(e, errShieldCaptureSuperseded) {
+				tokens = nil
+			} else if e != nil {
+				return e
+			}
+		}
+	}
+	// Fence the capture head after all historical reads, including any
+	// previously uncached private checkpoint heights.
 	if _, e = recorder.ChainID(ctx); e != nil {
 		return e
 	}
@@ -251,7 +282,18 @@ func (s *WalletSession) RefreshStateWithOptions(ctx context.Context, options Sta
 	if e != nil {
 		return e
 	}
-	return credit.ReconcilePending(ctx, s.CreditReconciler("latest"))
+	if e = credit.ReconcilePending(ctx, s.CreditReconciler("latest")); e != nil {
+		return e
+	}
+	if len(tokens) > 0 {
+		// A later initialization owns its ticket. The earlier inventory
+		// refresh may finish, but cannot replace the newer receipt.
+		if err := s.publishShieldCapture(ctx, ticket, service, before, tokens, b); !errors.Is(err, errShieldCaptureSuperseded) {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (s *WalletSession) replayCredits(ctx context.Context, target protocolrpc.CanonicalBlock, size uint64, o ScanOptions, result *RefreshResult) error {

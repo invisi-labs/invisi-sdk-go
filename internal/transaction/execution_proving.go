@@ -160,7 +160,9 @@ func (o *Execution) ProveInternal(ctx context.Context, options ...TransactionPro
 		if e = o.Encode(); e != nil {
 			return nil, e
 		}
-		o.Status = "ready"
+		if !o.requiresSource() {
+			o.Status = "ready"
+		}
 	}
 	if e = o.Persist(ctx, o.Status); e != nil {
 		return nil, e

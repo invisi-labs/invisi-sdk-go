@@ -116,6 +116,11 @@ func (p *testProver) Verify(context.Context, prover.ProofBundle, prover.ProofSta
 }
 
 func testSession(t testing.TB, timestamps ...uint64) (*WalletSession, common.Address, *testProver) {
+	return testSessionWithClients(t, nil, nil, timestamps...)
+}
+
+// Tests can wrap normal RPC transports while sharing the same canonical inventory fixture.
+func testSessionWithClients(t testing.TB, httpClient *http.Client, chainClient func(sessionProvider) sdk.Provider, timestamps ...uint64) (*WalletSession, common.Address, *testProver) {
 	timestamp := uint64(100)
 	if len(timestamps) > 0 {
 		timestamp = timestamps[0]
@@ -177,17 +182,21 @@ func testSession(t testing.TB, timestamps ...uint64) (*WalletSession, common.Add
 		json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": result})
 	}))
 	t.Cleanup(server.Close)
-	rpc, e := sdk.NewProtocolRpcClient(server.URL + "/v1")
+	rpc, e := sdk.NewProtocolRpcClient(server.URL+"/v1", protocolrpc.ClientOptions{HTTPClient: httpClient})
 	if e != nil {
 		t.Fatal(e)
 	}
-	pool, e := sdk.ProtocolFromRPC(ctx, rpc, provider)
+	var primary sdk.Provider = provider
+	if chainClient != nil {
+		primary = chainClient(provider)
+	}
+	pool, e := sdk.ProtocolFromRPC(ctx, rpc, primary)
 	if e != nil {
 		t.Fatal(e)
 	}
 	store := NewMemoryWalletStore()
 	backend := &testProver{}
-	session, e := Connect(ctx, Options{Invisi: sdk.NewInvisi(sdk.InvisiOptions{ProtocolRPC: rpc, Provider: provider, Prover: backend}), Store: store, Wallet: wallet, Protocol: pool, Namespace: "tests"})
+	session, e := Connect(ctx, Options{Invisi: sdk.NewInvisi(sdk.InvisiOptions{ProtocolRPC: rpc, Provider: primary, Prover: backend}), Store: store, Wallet: wallet, Protocol: pool, Namespace: "tests"})
 	if e != nil {
 		t.Fatal(e)
 	}

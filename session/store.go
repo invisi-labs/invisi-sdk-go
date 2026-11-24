@@ -12,6 +12,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/invisi-labs/invisi-sdk-go/internal/storewatch"
 	transaction "github.com/invisi-labs/invisi-sdk-go/internal/transaction"
 	protocolrpc "github.com/invisi-labs/invisi-sdk-go/rpc"
 	creditsession "github.com/invisi-labs/invisi-sdk-go/session/credit"
@@ -97,7 +98,12 @@ func (m *MemoryWalletStore) ReadSnapshot(ctx context.Context, scope WalletScope)
 	return CloneState(s)
 }
 
+func (m *MemoryWalletStore) ObserveScopeWrites(scope string) func() bool {
+	return storewatch.Observe(m, scope)
+}
+
 func (m *MemoryWalletStore) Update(ctx context.Context, scope WalletScope, update func(*WalletState) error) error {
+	defer storewatch.Write(m, scope.Key())()
 	if e := ctx.Err(); e != nil {
 		return e
 	}

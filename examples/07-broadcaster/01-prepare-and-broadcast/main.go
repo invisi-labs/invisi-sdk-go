@@ -132,6 +132,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if ready.Preview().Status == "proved" {
+		ready, err = ready.Ready(ctx)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 	quote, err := ready.ExportBroadcasterQuote(ctx)
 	if err != nil {
 		log.Fatal(err)

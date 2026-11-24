@@ -12,7 +12,10 @@ import (
 
 func (o *Execution) ValidateRecovered() error {
 	p := o.Plan
-	if p.Version != 1 || p.OwnerAddress != o.Runtime.Wallet.ownerAddress || p.Namespace != o.Runtime.Scope.Namespace {
+	if (p.Version == 2) != p.RetainedShieldAnchor || (p.RetainedShieldAnchor && (p.SubmissionValidation != "required" || p.Kind != "shield" || p.FundingMode != "signature" || p.Block.Hash == (common.Hash{}))) {
+		return errors.New("invalid retained Shield preparation metadata")
+	}
+	if (p.Version != 1 && p.Version != 2) || p.OwnerAddress != o.Runtime.Wallet.ownerAddress || p.Namespace != o.Runtime.Scope.Namespace {
 		return errors.New("recovered wallet scope mismatch")
 	}
 	if err := o.ValidateBroadcasterPlan(); err != nil {

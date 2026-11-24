@@ -9,6 +9,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/invisi-labs/invisi-sdk-go/internal/storewatch"
 	"github.com/invisi-labs/invisi-sdk-go/session"
 )
 
@@ -79,7 +80,12 @@ func (s *WalletStore) ReadSnapshot(ctx context.Context, scope session.WalletScop
 	}
 	return state, nil
 }
+func (s *WalletStore) ObserveScopeWrites(scope string) func() bool {
+	return storewatch.Observe(s.db, "wallet/"+scope)
+}
+
 func (s *WalletStore) Update(ctx context.Context, scope session.WalletScope, update func(*session.WalletState) error) error {
+	defer storewatch.Write(s.db, "wallet/"+scope.Key())()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, e := s.db.BeginTx(ctx, nil)

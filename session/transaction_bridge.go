@@ -4,6 +4,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -45,11 +46,7 @@ func (o *Operation) quoteBroadcaster(ctx context.Context, c *broadcaster.Client,
 	o.apply(execution)
 	return result0
 }
-func (o *Operation) extendBroadcasterInputs(ctx context.Context, base transaction.Plan, fee *big.Int) (transaction.Plan, error) {
-	execution := o.execution()
-	result0, result1 := execution.ExtendBroadcasterInputs(ctx, base, fee)
-	return result0, result1
-}
+
 func (o *Operation) exportBroadcasterQuote() (broadcaster.SignedQuote, error) {
 	execution := o.execution()
 	result0, result1 := execution.ExportBroadcasterQuoteInternal()
@@ -71,6 +68,15 @@ func (o *Operation) ExportBroadcasterIntent(ctx context.Context) ([]byte, error)
 }
 func (o *Operation) submitBroadcaster(ctx context.Context, c *broadcaster.Client) (broadcaster.Status, error) {
 	execution := o.execution()
+	state, err := o.session.options.Store.ReadSnapshot(ctx, o.session.scope)
+	if err != nil {
+		return broadcaster.Status{}, err
+	}
+	record, ok := state.Operations[o.plan.ID]
+	if !ok || state.Invalidated || record.WorkerID != o.workerID {
+		return broadcaster.Status{}, errors.New("stale operation worker")
+	}
+	execution.PriorExternalized = record.Externalized
 	result0, result1 := execution.SubmitViaBroadcaster(ctx, c)
 	o.apply(execution)
 	return result0, result1

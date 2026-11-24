@@ -21,7 +21,7 @@ func (o *Operation) ExportTransaction(ctx context.Context) (sdk.TransactionCall,
 		return sdk.TransactionCall{}, errors.New("ready EVM transaction required")
 	}
 	if err := func() error {
-		if o.plan.SubmissionValidation == "required" {
+		if o.plan.OfflinePreparation() {
 			return nil
 		}
 		return o.validateExport(ctx)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/invisi-labs/invisi-sdk-go/credit"
+	"github.com/invisi-labs/invisi-sdk-go/internal/storewatch"
 	"github.com/invisi-labs/invisi-sdk-go/primitives"
 	protocolrpc "github.com/invisi-labs/invisi-sdk-go/rpc"
 	"github.com/invisi-labs/invisi-sdk-go/rpc/chain"
@@ -16,6 +17,7 @@ import (
 )
 
 type PrivateScanState struct {
+	ResetRevision                                                uint64 `json:",omitempty"`
 	Generation                                                   uint64
 	Coverage                                                     []CoverageRange
 	RecoveryBoundary                                             uint64
@@ -104,7 +106,7 @@ func (s *WalletSession) historyTarget(ctx context.Context, o ScanOptions) (proto
 		return target, nil, errors.New("chain observation precedes history target")
 	}
 	head := &protocolrpc.CanonicalBlock{Number: h.Number.Uint64(), Hash: h.Hash(), ParentHash: h.ParentHash, Timestamp: h.Time}
-	e = s.publicHistory.options.Store.Update(ctx, s.publicHistory.key, func(v *PublicHistoryState) error {
+	e = updatePublicHistory(ctx, s.publicHistory.options.Store, s.publicHistory.key, func(v *PublicHistoryState) error {
 		if v.KnownHead == nil || v.KnownHead.Number <= head.Number {
 			b := *head
 			v.KnownHead = &b
@@ -187,13 +189,14 @@ func (s *WalletSession) SynchronizeHistory(ctx context.Context, o ScanOptions) e
 	return nil
 }
 func (s *WalletSession) ScanHistory(ctx context.Context, d wallet.DeliveryDecryptor, o ScanOptions) (RefreshResult, error) {
+	ticket := s.beginShieldCapture()
 	select {
 	case s.refreshGate <- struct{}{}:
 		defer func() { <-s.refreshGate }()
 	case <-ctx.Done():
 		return RefreshResult{}, ctx.Err()
 	}
-	return s.scanHistory(ctx, d, o)
+	return s.scanHistory(ctx, d, o, ticket, nil)
 }
 
 type stagedPublicPage struct {
@@ -201,7 +204,7 @@ type stagedPublicPage struct {
 	Generation uint64
 }
 
-func (s *WalletSession) scanHistory(ctx context.Context, d wallet.DeliveryDecryptor, o ScanOptions, staged ...*stagedPublicPage) (RefreshResult, error) {
+func (s *WalletSession) scanHistory(ctx context.Context, d wallet.DeliveryDecryptor, o ScanOptions, ticket *shieldPreparationAnchor, staged *stagedPublicPage) (RefreshResult, error) {
 	ctx = withScanStateCache(ctx)
 	var result RefreshResult
 	if d == nil {
@@ -288,7 +291,10 @@ func (s *WalletSession) scanHistory(ctx context.Context, d wallet.DeliveryDecryp
 	if o.Reset {
 		if store, ok := s.recordStore(); ok {
 			if restorer, ok := store.(JournalRestorer); ok {
-				if e = restorer.RestoreExternalizedOperations(ctx, s.scope); e != nil {
+				finishWrite := storewatch.WriteAdapter(store, s.scope.Key())
+				e = restorer.RestoreExternalizedOperations(ctx, s.scope)
+				finishWrite()
+				if e != nil {
 					return result, e
 				}
 				state, e = s.options.Store.ReadSnapshot(ctx, s.scope)
@@ -317,7 +323,7 @@ func (s *WalletSession) scanHistory(ctx context.Context, d wallet.DeliveryDecryp
 		e = s.options.Store.Update(ctx, s.scope, func(v *WalletState) error {
 			v.Notes = map[common.Hash]StoredNote{}
 			v.PostpaidCredit.Grants = map[string]creditsession.StoredState{}
-			v.Scan = PrivateScanState{Generation: public.Generation}
+			v.Scan = PrivateScanState{Generation: public.Generation, ResetRevision: v.Revision + 1}
 			v.DiscoveryThrough = nil
 			v.ObservedThrough = nil
 			v.CheckedThrough = nil
@@ -364,9 +370,9 @@ func (s *WalletSession) scanHistory(ctx context.Context, d wallet.DeliveryDecryp
 		}
 		var page PublicPage
 		var e error
-		if len(staged) > 0 && staged[0] != nil && staged[0].Generation == public.Generation && staged[0].Page.Range == q {
-			page = staged[0].Page
-			staged[0] = nil
+		if staged != nil && staged.Generation == public.Generation && staged.Page.Range == q {
+			page = staged.Page
+			staged = nil
 		} else {
 			page, e = s.publicHistory.Page(ctx, q, o.Offline)
 		}
@@ -483,7 +489,7 @@ func (s *WalletSession) scanHistory(ctx context.Context, d wallet.DeliveryDecryp
 			return result, e
 		}
 		if !o.SkipStateRefresh {
-			if e = s.RefreshState(ctx); e != nil {
+			if e = s.refreshState(ctx, StateRefreshOptions{}, ticket); e != nil {
 				return result, e
 			}
 		}
@@ -519,7 +525,7 @@ func (s *WalletSession) deliveryResolver(ctx context.Context, d wallet.DeliveryD
 	}
 }
 
-func (s *WalletSession) stageSharedRefresh(ctx context.Context, o RefreshOptions) (*PendingWalletRefresh, error) {
+func (s *WalletSession) stageSharedRefresh(ctx context.Context, o RefreshOptions, ticket *shieldPreparationAnchor) (*PendingWalletRefresh, error) {
 	options := ScanOptions{FromBlock: refreshLowerBound(o.FromBlock), ToBlock: o.ToBlock, PageSize: o.PageSize, Reset: o.Reset}
 	size, e := scanSize(options)
 	if e != nil {
@@ -577,7 +583,7 @@ func (s *WalletSession) stageSharedRefresh(ctx context.Context, o RefreshOptions
 	}
 	height := target.Number
 	o.ToBlock = &height
-	return &PendingWalletRefresh{Block: &target, session: s, base: base, options: o, staged: staged}, nil
+	return &PendingWalletRefresh{Block: &target, session: s, base: base, options: o, staged: staged, shieldCapture: ticket}, nil
 }
 
 func refreshLowerBound(n uint64) *uint64 {

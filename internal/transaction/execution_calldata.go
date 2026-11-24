@@ -36,6 +36,36 @@ func (o *Execution) ReadyInternal(ctx context.Context) (*Execution, error) {
 	if e := o.CheckLease(ctx); e != nil {
 		return nil, e
 	}
+	if o.requiresSource() {
+		if (o.Status != "proved" && o.Status != "ready") || o.Bundle == nil {
+			return nil, errors.New("prove the transaction before provenance finalization")
+		}
+		if o.Plan.FundingMode == "signature" && len(o.Plan.Funding.Signature) == 0 {
+			return nil, errors.New("authorize funding before provenance finalization")
+		}
+		if err := o.ValidateRecovered(); err != nil {
+			return nil, err
+		}
+		if len(o.Data) == 0 {
+			return nil, errors.New("final transaction envelope required")
+		}
+
+		if o.Plan.Provenance == nil {
+			proof, err := o.prepareProvenance(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if err = ctx.Err(); err != nil {
+				return nil, err
+			}
+			o.Plan.Provenance = proof
+		}
+		if err := o.validateProvenance(ctx, o.Plan.Provenance, false); err != nil {
+			return nil, err
+		}
+		o.Status = "ready"
+		return o, o.Persist(ctx, "ready")
+	}
 	if o.Plan.Kind != "shield" || o.Status != "prepared" {
 		return nil, errors.New("Ready is for prepared shield operations")
 	}
@@ -47,6 +77,10 @@ func (o *Execution) ReadyInternal(ctx context.Context) (*Execution, error) {
 	}
 	o.Status = "ready"
 	return o, o.Persist(ctx, o.Status)
+}
+
+func (o *Execution) requiresSource() bool {
+	return o.Plan.Kind == "transact" && len(o.Plan.Inputs) > 0 && o.Plan.Broadcaster != nil && o.Plan.Broadcaster.Signed.ProvenanceRequired
 }
 
 func (o *Execution) ShieldParams() protocol.BuildShieldCalldataParams {

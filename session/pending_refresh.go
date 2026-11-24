@@ -16,13 +16,14 @@ type walletResolver func(wallet.Method, wallet.DecryptParams) (any, error)
 
 // PendingWalletRefresh retains canonical candidate pages until App decryption is validated.
 type PendingWalletRefresh struct {
-	Block   *protocolrpc.CanonicalBlock
-	mu      sync.Mutex
-	applied bool
-	staged  *stagedPublicPage
-	session *WalletSession
-	base    WalletState
-	options RefreshOptions
+	shieldCapture *shieldPreparationAnchor
+	Block         *protocolrpc.CanonicalBlock
+	mu            sync.Mutex
+	applied       bool
+	staged        *stagedPublicPage
+	session       *WalletSession
+	base          WalletState
+	options       RefreshOptions
 }
 
 func walletFingerprint(m wallet.Method, p wallet.DecryptParams) string {
@@ -73,7 +74,7 @@ func resolveCredit(resolvers []walletResolver, envelope []byte, c credit.Deliver
 // Refresh stages canonical candidate discovery without changing the real inventory.
 // Inject an App DeliveryDecryptor to validate and atomically apply the staged inventory.
 func (s *WalletSession) Refresh(ctx context.Context, options RefreshOptions) (*PendingWalletRefresh, error) {
-	return s.stageSharedRefresh(ctx, options)
+	return s.stageSharedRefresh(ctx, options, s.beginShieldCapture())
 }
 
 func (p *PendingWalletRefresh) Decrypt(ctx context.Context, d wallet.DeliveryDecryptor) (RefreshResult, error) {
@@ -98,7 +99,7 @@ func (p *PendingWalletRefresh) Decrypt(ctx context.Context, d wallet.DeliveryDec
 	if current.Revision != p.base.Revision {
 		return RefreshResult{}, errors.New("wallet changed during pending refresh")
 	}
-	result, e := s.scanHistory(ctx, d, ScanOptions{ToBlock: p.options.ToBlock, PageSize: p.options.PageSize, Reset: p.options.Reset, FromBlock: refreshLowerBound(p.options.FromBlock)}, p.staged)
+	result, e := s.scanHistory(ctx, d, ScanOptions{ToBlock: p.options.ToBlock, PageSize: p.options.PageSize, Reset: p.options.Reset, FromBlock: refreshLowerBound(p.options.FromBlock)}, p.shieldCapture, p.staged)
 	if e == nil {
 		p.applied = true
 	}

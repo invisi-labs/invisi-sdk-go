@@ -24,6 +24,8 @@ type ProvenanceCapability struct {
 	official     *provenance.OfficialClients
 }
 type ProvenancePlan struct {
+	// Captured public trust authenticates the original evidence during offline journal recovery.
+	Trust                                                             *provenance.TrustContext `json:",omitempty"`
 	Endpoint, Generation, ProviderID, ManifestSHA256, OperationDigest string
 	Data                                                              string
 	Sidecars                                                          []provenance.ProofSidecar
@@ -42,7 +44,7 @@ type provenanceProvider interface {
 	GetProvenanceCapability() (source.ManifestIdentity, source.OfflineProver, error)
 }
 
-func (o *Execution) sourceCapability(ctx context.Context) (*ProvenanceCapability, error) {
+func (o *Execution) sourceClient(ctx context.Context) (*ProvenanceCapability, error) {
 	base := o.Runtime.Options.Provenance
 	if base == nil {
 		base = (&ProvenanceCapability{}).withOfficialDefaults()
@@ -59,6 +61,14 @@ func (o *Execution) sourceCapability(ctx context.Context) (*ProvenanceCapability
 			return nil, err
 		}
 	}
+	return &c, nil
+}
+
+func (o *Execution) sourceCapability(ctx context.Context) (*ProvenanceCapability, error) {
+	c, err := o.sourceClient(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if c.Prover == nil {
 		if native, ok := o.Runtime.Options.Prover.(provenanceProvider); ok {
 			var err error
@@ -72,7 +82,7 @@ func (o *Execution) sourceCapability(ctx context.Context) (*ProvenanceCapability
 	if !sourceNumber(t.ChainID, o.Plan.Context.ChainID.String()) || !sourceNumber(t.ProtocolAddress, o.Plan.Context.ProtocolAddress.Hex()) || (c.Prover != nil && c.Manifest.SHA256 != t.ManifestSHA256) {
 		return nil, errors.New("provenance capability deployment/manifest mismatch")
 	}
-	return &c, nil
+	return c, nil
 }
 func sourceNumber(a, b string) bool {
 	x, e := provenance.Uint(a, 256)
@@ -116,6 +126,11 @@ func (o *Execution) prepareProvenance(ctx context.Context) (*ProvenancePlan, err
 	if e != nil {
 		return nil, e
 	}
+	retainedTrust, e := Frozen(trust)
+	if e != nil {
+		return nil, e
+	}
+	out.Trust = &retainedTrust
 	out.Endpoint = c.Client.Endpoint
 	out.Generation = trust.ChainGeneration
 	out.ProviderID = trust.ProviderID
@@ -399,26 +414,59 @@ func (o *Execution) validateProvenance(ctx context.Context, saved *ProvenancePla
 		}
 		return nil
 	}
-	c, capabilityErr := o.sourceCapability(ctx)
-	if capabilityErr != nil {
-		return capabilityErr
+	c, err := o.sourceClient(ctx)
+	if err != nil {
+		return err
 	}
-	trust := c.Client.Trust
+	if err = o.validateSourceStatement(saved, c.Client.Endpoint, c.Client.Trust); err != nil {
+		return err
+	}
+	if remote {
+		if o.Runtime.Options.Provider == nil {
+			return &MissingCapabilityError{Capability: "Chain RPC provider for provenance anchor validation"}
+		}
+		for _, cert := range saved.Sidecars[0].ProofBundle.RootCertificates {
+			height, err := provenance.Uint(cert.ConfirmedBlockNumber, 64)
+			if err != nil {
+				return err
+			}
+			header, err := o.Runtime.Options.Provider.HeaderByNumber(ctx, height)
+			if err != nil {
+				return err
+			}
+			if header == nil || header.Number == nil || header.Number.Cmp(height) != 0 || header.Hash() != common.HexToHash(cert.ConfirmedBlockHash) {
+				return errors.New("stored provenance root anchor is no longer canonical on primary")
+			}
+		}
+		if _, err = c.Client.GetStatus(ctx); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
+func (o *Execution) validateSourceStatement(saved *ProvenancePlan, endpoint string, trust provenance.TrustContext) error {
 	if !sourceNumber(trust.ChainID, o.Plan.Context.ChainID.String()) || !sourceNumber(trust.ProtocolAddress, o.Plan.Context.ProtocolAddress.Hex()) {
 		return errors.New("provenance capability deployment mismatch")
 	}
-	if c.Client.Endpoint != saved.Endpoint || trust.ChainGeneration != saved.Generation || !sourceNumber(trust.ProviderID, saved.ProviderID) || trust.ManifestSHA256 != saved.ManifestSHA256 {
+	if endpoint != saved.Endpoint || trust.ChainGeneration != saved.Generation || !sourceNumber(trust.ProviderID, saved.ProviderID) || trust.ManifestSHA256 != saved.ManifestSHA256 {
 		return errors.New("stored provenance trust changed; explicit preparation required")
-	}
-	digest, e := o.sourceDigest()
-	if e != nil || digest != saved.OperationDigest || saved.Data != "0x"+common.Bytes2Hex(o.Data) {
-		return errors.New("stored provenance statement changed")
 	}
 	if len(saved.Sidecars) != 1 {
 		return errors.New("stored provenance attachments missing")
 	}
-	if e = provenance.ValidateProofBundle(saved.Sidecars[0].ProofBundle, trust); e != nil {
-		return e
+	if err := provenance.ValidateProofBundle(saved.Sidecars[0].ProofBundle, trust); err != nil {
+		return err
+	}
+	return o.validateSourceBinding(saved)
+}
+func (o *Execution) validateSourceBinding(saved *ProvenancePlan) error {
+	digest, e := o.sourceDigest()
+	if e != nil || digest != saved.OperationDigest || saved.Data != "0x"+common.Bytes2Hex(o.Data) {
+		return errors.New("stored provenance statement changed")
+	}
+	if len(saved.Sidecars) != 1 || len(saved.Sidecars[0].ProofBundle.PublicInputs) != 11 {
+		return errors.New("invalid stored provenance attachments")
 	}
 	bundle := saved.Sidecars[0].ProofBundle
 	if saved.Sidecars[0].OperationIndex != "0" || !sourceNumber(bundle.PublicInputs[2], o.Plan.Context.TokenAddress.Hex()) || !sourceNumber(bundle.PublicInputs[6], fmt.Sprint(len(o.Plan.Inputs))) {
@@ -438,28 +486,7 @@ func (o *Execution) validateProvenance(ctx context.Context, saved *ProvenancePla
 	if !sourceNumber(bundle.PublicInputs[7], new(big.Int).Rsh(common.HexToHash(digest).Big(), 128).String()) || !sourceNumber(bundle.PublicInputs[8], new(big.Int).And(common.HexToHash(digest).Big(), new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1))).String()) {
 		return errors.New("stored provenance digest mismatch")
 	}
-	if remote {
-		if o.Runtime.Options.Provider == nil {
-			return &MissingCapabilityError{Capability: "Chain RPC provider for provenance anchor validation"}
-		}
-		for _, cert := range bundle.RootCertificates {
-			height, err := provenance.Uint(cert.ConfirmedBlockNumber, 64)
-			if err != nil {
-				return err
-			}
-			header, err := o.Runtime.Options.Provider.HeaderByNumber(ctx, height)
-			if err != nil {
-				return err
-			}
-			if header == nil || header.Number == nil || header.Number.Cmp(height) != 0 || header.Hash() != common.HexToHash(cert.ConfirmedBlockHash) {
-				return errors.New("stored provenance root anchor is no longer canonical on primary")
-			}
-		}
-		if _, e = c.Client.GetStatus(ctx); e != nil {
-			return e
-		}
-	}
-	return ctx.Err()
+	return nil
 }
 
 func (o *Execution) exportProvenanceTracking() ([]provenance.Tracking, error) {
@@ -495,6 +522,9 @@ func (o *Execution) ProveProvenance(ctx context.Context, options ...ProvenancePr
 		return errors.New("expected at most one provenance prove options value")
 	}
 	reprove := len(options) == 1 && options[0].Reprove
+	if o.Status == "proved" && o.requiresSource() {
+		return errors.New("call Ready to finalize the required provenance proof")
+	}
 	if len(o.Data) == 0 || o.Bundle == nil {
 		return errors.New("ready transaction required for provenance proving")
 	}
@@ -503,6 +533,9 @@ func (o *Execution) ProveProvenance(ctx context.Context, options ...ProvenancePr
 	}
 	if o.Plan.Provenance != nil && !reprove {
 		return o.validateProvenance(ctx, o.Plan.Provenance, false)
+	}
+	if o.Plan.Broadcaster != nil && o.Plan.Broadcaster.Request != nil {
+		return errors.New("attempted broadcaster evidence is frozen")
 	}
 	previous := o.Plan.Provenance
 	// Old Source trust may be stale; independently authenticate the native plan and main proof.
@@ -568,7 +601,7 @@ func (o *Execution) SubmitProvenance(ctx context.Context) (provenance.Result, er
 	if e := o.validateProvenance(ctx, o.Plan.Provenance, false); e != nil {
 		return nil, e
 	}
-	c, e := o.sourceCapability(ctx)
+	c, e := o.sourceClient(ctx)
 	if e != nil {
 		return nil, e
 	}

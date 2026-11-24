@@ -14,11 +14,14 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 	"github.com/invisi-labs/invisi-sdk-go/credit"
+	"github.com/invisi-labs/invisi-sdk-go/internal/storewatch"
 	"github.com/invisi-labs/invisi-sdk-go/primitives"
 	"github.com/invisi-labs/invisi-sdk-go/prover"
 )
 
 type Options struct {
+	// CaptureSendGuard binds a first broadcaster send to the preparation session and current network.
+	CaptureSendGuard func(ctx context.Context, operationID, workerID string) (func(context.Context) error, error)
 	// ChainTimestamp reads fresh canonical chain time before a new payment submission.
 	ChainTimestamp      func(context.Context) (uint64, error)
 	WrapPreparation     func(string, error) error
@@ -34,6 +37,7 @@ type Options struct {
 	Context             *primitives.ProtocolContext
 }
 type Session struct {
+	captureSendGuard    func(context.Context, string, string) (func(context.Context) error, error)
 	chainTimestamp      func(context.Context) (uint64, error)
 	wrapPreparation     func(string, error) error
 	build               func(context.Context, any) (*credit.Prepared, error)
@@ -57,7 +61,10 @@ func New(options Options) (*Session, error) {
 		copy := *options.Context
 		pinned = &copy
 	}
-	return &Session{chainTimestamp: options.ChainTimestamp, checkCancellation: options.CheckCancellation, wrapPreparation: options.WrapPreparation, build: options.Build, checkPreparation: options.CheckPreparation, validatePreparation: options.ValidatePreparation, store: options.Store, owner: options.OwnerAddress, context: pinned, validate: options.Validate, prepare: options.Prepare, verifyRevocation: options.VerifyRevocation}, nil
+	if _, native := options.Store.(storewatch.Observer); !native {
+		options.Store = observedStore{options.Store}
+	}
+	return &Session{captureSendGuard: options.CaptureSendGuard, chainTimestamp: options.ChainTimestamp, checkCancellation: options.CheckCancellation, wrapPreparation: options.WrapPreparation, build: options.Build, checkPreparation: options.CheckPreparation, validatePreparation: options.ValidatePreparation, store: options.Store, owner: options.OwnerAddress, context: pinned, validate: options.Validate, prepare: options.Prepare, verifyRevocation: options.VerifyRevocation}, nil
 }
 func validateStored(s StoredState) error {
 	if s.GrantStatus > 2 || s.Revoked != (s.GrantStatus == 2) {
@@ -427,7 +434,9 @@ func (o *Operation) WithRevocationSignature(ctx context.Context, signature []byt
 	})
 }
 
-func (o *Operation) checkFresh(ctx context.Context) error {
+func (o *Operation) checkFresh(ctx context.Context) error { return o.checkPreparation(ctx, true) }
+
+func (o *Operation) checkPreparation(ctx context.Context, live bool) error {
 	if err := o.check(ctx); err != nil {
 		return err
 	}
@@ -464,6 +473,9 @@ func (o *Operation) checkFresh(ctx context.Context) error {
 		// Cached local payment work retains its authenticated preparation period.
 		// Only submission requires fresh canonical chain time; machine time cannot select a usage period.
 		return o.prepared.CheckTimestamp(now)
+	}
+	if !live {
+		return o.prepared.CheckTimestamp(record.Intent.Context.Timestamp)
 	}
 	return o.session.validate(ctx, record.Intent)
 }

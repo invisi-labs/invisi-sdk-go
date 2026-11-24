@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/invisi-labs/invisi-sdk-go/internal/storewatch"
 	transaction "github.com/invisi-labs/invisi-sdk-go/internal/transaction"
 	"github.com/invisi-labs/invisi-sdk-go/primitives"
 	"github.com/invisi-labs/invisi-sdk-go/prover"
@@ -35,16 +36,17 @@ type sessionOptions struct {
 	FundingSigner sdk.FundingSigner
 }
 type WalletSession struct {
-	publicHistory *PublicHistory
-	history       *sessionNotifications
-	refreshGate   chan struct{}
-	sends         *sessionSendState
-	options       sessionOptions
-	wallet        *sdk.Wallet
-	protocol      *chain.Protocol
-	scope         WalletScope
-	rpc           *protocolrpc.ProtocolRpcClient
-	runtime       *transaction.Runtime
+	shieldPreparations *shieldPreparationState
+	publicHistory      *PublicHistory
+	history            *sessionNotifications
+	refreshGate        chan struct{}
+	sends              *sessionSendState
+	options            sessionOptions
+	wallet             *sdk.Wallet
+	protocol           *chain.Protocol
+	scope              WalletScope
+	rpc                *protocolrpc.ProtocolRpcClient
+	runtime            *transaction.Runtime
 }
 
 func Connect(ctx context.Context, options Options) (*WalletSession, error) {
@@ -84,7 +86,7 @@ func Connect(ctx context.Context, options Options) (*WalletSession, error) {
 	if e != nil {
 		return nil, e
 	}
-	s := &WalletSession{history: newSessionNotifications(), refreshGate: make(chan struct{}, 1), sends: &sessionSendState{sending: map[string]bool{}}, options: sessionOptions{options.Invisi.GetInfrastructure(), options.Store, options.Signer, options.FundingSigner}, wallet: runtime.Wallet, protocol: options.Protocol, scope: runtime.Scope, rpc: runtime.RPC, runtime: runtime}
+	s := &WalletSession{shieldPreparations: new(shieldPreparationState), history: newSessionNotifications(), refreshGate: make(chan struct{}, 1), sends: &sessionSendState{sending: map[string]bool{}}, options: sessionOptions{options.Invisi.GetInfrastructure(), options.Store, options.Signer, options.FundingSigner}, wallet: runtime.Wallet, protocol: options.Protocol, scope: runtime.Scope, rpc: runtime.RPC, runtime: runtime}
 	s.publicHistory = options.PublicHistory
 	if s.publicHistory == nil {
 		s.publicHistory, e = sharedPublicHistory(options.Invisi, options.Protocol)
@@ -135,6 +137,26 @@ func Connect(ctx context.Context, options Options) (*WalletSession, error) {
 	runtime.OnInvalidate = s.invalidate
 	runtime.OnReprice = func(ctx context.Context, e *transaction.Execution) error {
 		return operationFromExecution(s, e).commitBroadcasterPlan(ctx)
+	}
+	walletStore := options.Store
+	runtime.ObserveSendWrites = func() func() bool {
+		wallet := storewatch.ObserveStore(walletStore, s.scope.Key())
+		history := storewatch.ObserveStore(s.publicHistory.Store(), s.publicHistory.Key())
+		return func() bool {
+			walletChanged := wallet()
+			return history() || walletChanged
+		}
+	}
+	runtime.SendGeneration = func(ctx context.Context, e *transaction.Execution) (uint64, error) {
+		state, err := s.fencedSnapshot(ctx)
+		if err != nil {
+			return 0, err
+		}
+		record, ok := state.Operations[e.ID()]
+		if !ok || state.Invalidated || record.WorkerID != e.WorkerID {
+			return 0, errors.New("wallet submission authority changed")
+		}
+		return state.Scan.Generation, nil
 	}
 	runtime.OnExternalize = func(ctx context.Context, e *transaction.Execution) error { return s.externalize(ctx, e) }
 	return s, nil
@@ -190,6 +212,7 @@ func (s *WalletSession) runtimeSnapshot() *transaction.Runtime {
 		runtime = *s.runtime
 	}
 	runtime.Options.InvisiOptions = s.options.InvisiOptions
+	runtime.SendProvider = func() protocolrpc.ChainProvider { return s.options.Provider }
 	runtime.Options.Signer = s.options.Signer
 	runtime.Options.FundingSigner = s.options.FundingSigner
 	runtime.Wallet = s.wallet

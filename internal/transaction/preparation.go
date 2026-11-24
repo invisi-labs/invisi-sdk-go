@@ -16,6 +16,7 @@ import (
 	"github.com/invisi-labs/invisi-sdk-go/primitives"
 	"github.com/invisi-labs/invisi-sdk-go/protocol"
 	protocolrpc "github.com/invisi-labs/invisi-sdk-go/rpc"
+	"github.com/invisi-labs/invisi-sdk-go/rpc/chain"
 )
 
 type FundingSource struct {
@@ -67,17 +68,21 @@ type Withdrawal struct {
 }
 
 type PreparedOutput struct {
-	Address    string
-	Note       *primitives.Note
-	Amount     *big.Int
-	Identity   common.Hash
-	Commitment common.Hash
-	Delivery   protocol.Delivery
-	Change     bool
+	ChangeRecipient string `json:",omitempty"`
+	Address         string
+	Note            *primitives.Note
+	Amount          *big.Int
+	Identity        common.Hash
+	Commitment      common.Hash
+	Delivery        protocol.Delivery
+	Change          bool
 }
 
 type Plan struct {
+	ChangeAddress        string `json:",omitempty"`
 	SubmissionValidation string `json:",omitempty"`
+	RetainedShieldAnchor bool   `json:",omitempty"`
+	shieldReceipt        *ShieldPreparationReceipt
 	Version              int
 	OwnerAddress         common.Address
 	Namespace            string
@@ -101,6 +106,11 @@ type Plan struct {
 	Provenance  *ProvenancePlan
 }
 
+// OfflinePreparation permits historical signing/export only for the existing offline mode.
+func (p *Plan) OfflinePreparation() bool {
+	return p.SubmissionValidation == "required" && !p.RetainedShieldAnchor
+}
+
 func ValidatePayload(payload []byte) error { return primitives.ValidatePayload(payload) }
 
 func Positive(amount *big.Int, bits int) error {
@@ -110,20 +120,31 @@ func Positive(amount *big.Int, bits int) error {
 	return nil
 }
 
+type tokenCodeCheck int
+
+const (
+	noTokenCode tokenCodeCheck = iota
+	tokenCodeAtFrame
+	tokenCodeAtPersistence
+)
+
 func (s *Runtime) Frame(ctx context.Context, token common.Address, deadline uint64) (protocol.TransactionContext, protocolrpc.CanonicalBlock, uint64, error) {
-	return s.frame(ctx, token, deadline, true)
+	return s.frame(ctx, token, deadline, tokenCodeAtFrame)
 }
 
 // RevocationFrame validates a revocation without requiring token code when no fee moves tokens.
 func (s *Runtime) RevocationFrame(ctx context.Context, token common.Address, deadline uint64, fee *big.Int) (protocol.TransactionContext, protocolrpc.CanonicalBlock, uint64, error) {
-	return s.frame(ctx, token, deadline, fee != nil && fee.Sign() != 0)
+	if fee != nil && fee.Sign() != 0 {
+		return s.Frame(ctx, token, deadline)
+	}
+	return s.frame(ctx, token, deadline, noTokenCode)
 }
 
-func (s *Runtime) frame(ctx context.Context, token common.Address, deadline uint64, requireToken bool) (protocol.TransactionContext, protocolrpc.CanonicalBlock, uint64, error) {
+func (s *Runtime) frame(ctx context.Context, token common.Address, deadline uint64, tokenCheck tokenCodeCheck) (protocol.TransactionContext, protocolrpc.CanonicalBlock, uint64, error) {
 	var block protocolrpc.CanonicalBlock
 	c := protocol.TransactionContext{ChainID: new(big.Int).SetUint64(s.Protocol.Context().ChainID), ProtocolAddress: s.Protocol.Context().ProtocolAddress, TokenAddress: token}
 	var e error
-	if requireToken {
+	if tokenCheck != noTokenCode {
 		c, e = s.Protocol.ForToken(token)
 	}
 
@@ -146,18 +167,11 @@ func (s *Runtime) frame(ctx context.Context, token common.Address, deadline uint
 		return c, block, 0, errors.New("invalid latest block")
 	}
 	block = protocolrpc.CanonicalBlock{Number: head.Number.Uint64(), Hash: head.Hash(), ParentHash: head.ParentHash, Timestamp: head.Time}
-	timestamp := head.Time
-	if s.Snapshot != nil && time.Now().Unix() > 0 && uint64(time.Now().Unix()) > timestamp {
-		timestamp = uint64(time.Now().Unix())
+	deadline, e = frameDeadline(&c, block.Timestamp, deadline, s.Snapshot != nil)
+	if e != nil {
+		return c, block, 0, e
 	}
-	if deadline == 0 {
-		deadline = timestamp + 300
-	}
-	if deadline < timestamp || deadline-timestamp > 1<<53 {
-		return c, block, 0, errors.New("invalid deadline")
-	}
-	c.Now = new(big.Int).SetUint64(timestamp)
-	if requireToken {
+	if tokenCheck == tokenCodeAtFrame {
 		code, e := s.Options.Provider.CodeAt(ctx, token, new(big.Int).SetUint64(block.Number))
 		if e != nil {
 			return c, block, 0, e
@@ -190,6 +204,20 @@ func (s *Runtime) frame(ctx context.Context, token common.Address, deadline uint
 		}
 	}
 	return c, block, deadline, nil
+}
+
+func frameDeadline(c *protocol.TransactionContext, timestamp, deadline uint64, historical bool) (uint64, error) {
+	if now := time.Now().Unix(); historical && now > 0 && uint64(now) > timestamp {
+		timestamp = uint64(now)
+	}
+	if deadline == 0 {
+		deadline = timestamp + 300
+	}
+	if deadline < timestamp || deadline-timestamp > 1<<53 {
+		return 0, errors.New("invalid deadline")
+	}
+	c.Now = new(big.Int).SetUint64(timestamp)
+	return deadline, nil
 }
 
 func (s *Runtime) PrepareFunds(ctx context.Context, p TransferPreparation, withdrawal common.Address, withdrawAmount *big.Int, commitments []common.Hash) (*Execution, error) {
@@ -288,7 +316,7 @@ func (s *Runtime) PrepareFunds(ctx context.Context, p TransferPreparation, withd
 	for _, out := range outputs {
 		params.NoteCommitments = append(params.NoteCommitments, out.Commitment)
 	}
-	plan := Plan{Kind: "transact", Target: target, Context: c, Block: block, Deadline: deadline, Inputs: inputs, Memberships: memberships, Outputs: outputs, Funding: funding, FundingMode: mode, Params: params, Capacity: capacity, NeedsAuthorization: len(inputs) > 0 && !(withdrawal == s.Wallet.ownerAddress && withdrawAmount.Cmp(sum) == 0 && len(outputs) == 0 && funding.Amount.Sign() == 0 && fee.Amount.Sign() == 0)}
+	plan := Plan{ChangeAddress: s.ChangeAddress, Kind: "transact", Target: target, Context: c, Block: block, Deadline: deadline, Inputs: inputs, Memberships: memberships, Outputs: outputs, Funding: funding, FundingMode: mode, Params: params, Capacity: capacity, NeedsAuthorization: len(inputs) > 0 && !(withdrawal == s.Wallet.ownerAddress && withdrawAmount.Cmp(sum) == 0 && len(outputs) == 0 && funding.Amount.Sign() == 0 && fee.Amount.Sign() == 0)}
 	return s.PersistPlan(ctx, plan)
 }
 
@@ -318,9 +346,52 @@ func (s *Runtime) PrepareShield(ctx context.Context, p ShieldPreparation) (resul
 	if err != nil {
 		return nil, err
 	}
-	c, block, deadline, e := s.Frame(ctx, p.TokenAddress, p.Deadline)
-	if e != nil {
-		return nil, e
+	binding := s.CanonicalShieldBinding(p)
+	var c protocol.TransactionContext
+	var block protocolrpc.CanonicalBlock
+	var deadline uint64
+	var e error
+	checkCanonical := s.Canonical
+	if s.ShieldPreparation != nil {
+		if binding == nil || s.ShieldPreparation.Token != p.TokenAddress {
+			return nil, errors.New("owned binding and captured token required for initialized Shield")
+		}
+		block = s.ShieldPreparation.Block
+		c, e = s.Protocol.ForToken(p.TokenAddress)
+		if e != nil {
+			return nil, e
+		}
+		deadline, e = frameDeadline(&c, block.Timestamp, p.Deadline, true)
+		if e != nil {
+			return nil, e
+		}
+		if p.Funding.SigNonce == nil {
+			p.Funding.SigNonce, e = s.Protocol.ReadAuthorizationNonce(ctx, binding, p.Funding.Payer)
+		} else {
+			e = s.Protocol.ValidateNetwork(ctx, binding)
+		}
+		if e != nil {
+			return nil, e
+		}
+		if e = s.ShieldPreparation.Check(ctx, s); e != nil {
+			return nil, e
+		}
+		checkCanonical = func(ctx context.Context, _ protocolrpc.CanonicalBlock) error {
+			return s.ShieldPreparation.Check(ctx, s)
+		}
+	} else {
+		tokenCheck := tokenCodeAtFrame
+		if binding != nil {
+			tokenCheck = tokenCodeAtPersistence
+			epoch := binding.Epoch()
+			checkCanonical = func(ctx context.Context, block protocolrpc.CanonicalBlock) error {
+				return s.checkShieldToken(ctx, binding, epoch, p.TokenAddress, block)
+			}
+		}
+		c, block, deadline, e = s.frame(ctx, p.TokenAddress, p.Deadline, tokenCheck)
+		if e != nil {
+			return nil, e
+		}
 	}
 	funding, mode, e := s.Funding(ctx, &p.Funding, block, deadline)
 	if e != nil {
@@ -334,6 +405,14 @@ func (s *Runtime) PrepareShield(ctx context.Context, p ShieldPreparation) (resul
 		return nil, e
 	}
 	plan := Plan{Kind: "shield", Context: c, Block: block, Deadline: deadline, Funding: funding, FundingMode: mode, Shield: protocol.ShieldParams{FeeRecipient: fee.Recipient, FeeAmount: fee.Amount, Token: p.TokenAddress, Deadline: new(big.Int).SetUint64(deadline)}}
+	if s.ShieldPreparation != nil {
+		plan.SubmissionValidation = "required"
+		plan.RetainedShieldAnchor = true
+		plan.shieldReceipt = s.ShieldPreparation
+		if funding.Deadline.Cmp(c.Now) < 0 {
+			return nil, errors.New("funding authorization deadline expired")
+		}
+	}
 	sum := new(big.Int)
 	plan.Outputs, e = MapPreparation(ctx, len(p.Outputs), func(ctx context.Context, index int) (PreparedOutput, error) {
 		out := p.Outputs[index]
@@ -354,7 +433,56 @@ func (s *Runtime) PrepareShield(ctx context.Context, p ShieldPreparation) (resul
 	if sum.Cmp(funding.Amount) != 0 {
 		return nil, errors.New("shield funding must equal output sum plus fee")
 	}
-	return s.PersistPlan(ctx, plan)
+	return s.persistPlan(ctx, plan, checkCanonical)
+}
+
+// Only live, managed, signature-funded Shields with self-contained recipients
+// defer the token read. Every wallet checkpoint and the final store reservation
+// still runs through the normal frame and persistence paths.
+func (s *Runtime) CanonicalShieldBinding(p ShieldPreparation) *chain.HTTPBinding {
+	binding, _ := s.Options.Provider.(*chain.HTTPBinding)
+	if binding == nil || s.Snapshot != nil || s.OnComplete == nil || s.ExplicitInventory != nil || s.Options.FundingVerifier != nil ||
+		p.Funding.Permit != nil || (p.Funding.Authorization != "" && p.Funding.Authorization != "signature") || len(p.Outputs) == 0 || len(p.Outputs) > 10 {
+		return nil
+	}
+	for _, out := range p.Outputs {
+		if out.saved == nil || out.saved.Note == nil || out.saved.Pending {
+			return nil
+		}
+		address, err := primitives.DecodeAddress(out.To())
+		if err != nil || address.Kind != "long" {
+			return nil
+		}
+	}
+	return binding
+}
+
+func (s *Runtime) checkShieldToken(ctx context.Context, binding *chain.HTTPBinding, epoch uint64, token common.Address, block protocolrpc.CanonicalBlock) error {
+	if binding.Epoch() != epoch {
+		return errors.New("HTTP binding changed during Shield preparation")
+	}
+	code, supported, err := binding.CodeAtCanonicalHash(ctx, token, block.Hash)
+	if err != nil {
+		return err
+	}
+	if !supported {
+		code, err = binding.CodeAt(ctx, token, new(big.Int).SetUint64(block.Number))
+		if err != nil {
+			return err
+		}
+	}
+	if len(code) == 0 {
+		return errors.New("token address must have contract code")
+	}
+	if !supported {
+		if err := s.Canonical(ctx, block); err != nil {
+			return err
+		}
+	}
+	if binding.Epoch() != epoch {
+		return errors.New("HTTP binding changed during Shield preparation")
+	}
+	return ctx.Err()
 }
 
 func RandomOperationID() (string, error) {

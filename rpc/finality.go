@@ -30,6 +30,11 @@ const (
 )
 
 var errNativeFinalityInconsistent = errors.New("inconsistent native finality response")
+
+// ErrFinalityInconsistent identifies malformed or unauthenticated native-tag
+// responses from tagged providers, including a mismatched declared header hash.
+// It shares the existing native-client error identity and classification.
+var ErrFinalityInconsistent = errNativeFinalityInconsistent
 var ErrFinalityUnsupported = errors.New("native finality tag unsupported")
 
 type HeaderProvider interface {

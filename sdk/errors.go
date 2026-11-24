@@ -2,6 +2,7 @@ package sdk
 
 import (
 	transaction "github.com/invisi-labs/invisi-sdk-go/internal/transaction"
+	"github.com/invisi-labs/invisi-sdk-go/rpc/broadcaster"
 )
 
 type InvisiError = transaction.InvisiError
@@ -19,3 +20,6 @@ const InvalidRecipient = transaction.InvalidRecipient
 const EVMAddressNotRegistered = transaction.EVMAddressNotRegistered
 
 const RecipientLookupFailed = transaction.RecipientLookupFailed
+
+// ErrReprepareRequired identifies a quote that needs a new business preparation.
+var ErrReprepareRequired = broadcaster.ErrReprepareRequired

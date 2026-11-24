@@ -312,6 +312,17 @@ func TestBroadcasterAutomaticallyProvesOnlyFinalReadySource(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
+			if ready.Status() != "proved" || prover.calls.Load() != 0 {
+				t.Fatalf("required Source bypassed explicit ready: %s", ready.Status())
+			}
+			ready, e = ready.Ready(ctx)
+			if e != nil || ready.plan.Provenance == nil || prover.calls.Load() != 1 {
+				t.Fatal("explicit ready must finalize Source", e)
+			}
+			ready, e = ready.Ready(ctx)
+			if e != nil || prover.calls.Load() != 1 {
+				t.Fatal("repeated ready regenerated evidence", e)
+			}
 			provider := ready.session.options.Provider
 			ready.session.options.Provider = nil
 			_, missingErr := c.Submit(ctx, ready)
@@ -319,7 +330,7 @@ func TestBroadcasterAutomaticallyProvesOnlyFinalReadySource(t *testing.T) {
 			if !errors.As(missingErr, &missing) {
 				t.Fatal("first broadcast without primary must fail with capability error", missingErr)
 			}
-			if prover.calls.Load() != 0 {
+			if prover.calls.Load() != 1 {
 				t.Fatal("missing primary invoked prover")
 			}
 			ready.session.options.Provider = provider
@@ -338,7 +349,7 @@ func TestBroadcasterAutomaticallyProvesOnlyFinalReadySource(t *testing.T) {
 			}
 			ready.session.options.Prover = nil
 			ready.session.options.Provider = nil
-			ready.session.options.Provenance.Prover = nil
+			ready.session.options.Provenance = nil
 			ready, e = ready.session.Resume(ctx, ready.ID())
 			if e != nil {
 				t.Fatal("cached source restore failed", e)
@@ -518,5 +529,100 @@ func TestProvenanceMissingPrimaryCapabilityPreservesJournal(t *testing.T) {
 				t.Fatal("missing primary invoked prover")
 			}
 		})
+	}
+}
+
+func TestRequiredSourceMixedFundingFinalizesAfterSignatureAndRetainsProofOnFailure(t *testing.T) {
+	ctx := context.Background()
+	s, token, main := testSession(t, uint64(time.Now().Unix()))
+	policy := &auditFundingPolicy{valid: true}
+	s.options.FundingVerifier = policy
+	address, _ := s.wallet.GetAddress()
+	op, e := s.PrepareTransfer(ctx, sdk.TransferPreparation{TokenAddress: token, Outputs: testOutputs(s, []testPaymentOutput{{To: address, Amount: big.NewInt(30)}}), Funding: &sdk.FundingSource{Payer: s.wallet.OwnerAddress(), Amount: big.NewInt(10)}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	source, _ := configureSourceFlow(t, s, op, false, false)
+	client, _ := testBroadcasterExecution(t, op, []int64{5}, false, nil, "direct", nil, common.Hash{})
+	if e = client.Quote(ctx, op, sdk.BroadcasterQuoteOptions{MaxFeeAmount: big.NewInt(10)}); e != nil {
+		t.Fatal(e)
+	}
+	op, e = authorizeForTest(op, ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	op, e = op.Prove(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = op.Ready(ctx); e == nil || source.calls.Load() != 0 {
+		t.Fatal("premature Source before funding signature", e)
+	}
+	request, e := op.ExportFundingAuthorization(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	sig, e := signFixtureRequest(request)
+	if e != nil {
+		t.Fatal(e)
+	}
+	op, e = op.WithFundingSignature(ctx, sig)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if op.Status() != "proved" || op.plan.Provenance != nil || source.calls.Load() != 0 || policy.calls != 1 {
+		t.Fatal("signing crossed the ready boundary")
+	}
+	before, e := s.options.Store.ReadSnapshot(ctx, s.scope)
+	if e != nil {
+		t.Fatal(e)
+	}
+	nested, cancel := context.WithCancel(ctx)
+	source.onProve = cancel
+	if _, e = op.Ready(nested); !errors.Is(e, context.Canceled) {
+		t.Fatal("expected canceled finalization", e)
+	}
+	cancel()
+	after, e := s.options.Store.ReadSnapshot(ctx, s.scope)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !reflect.DeepEqual(before.Operations[op.ID()], after.Operations[op.ID()]) || !reflect.DeepEqual(before.Notes, after.Notes) || len(main.requests) != 1 {
+		t.Fatal("failed ready changed proved record or reservations")
+	}
+	source.onProve = nil
+	op, e = op.Ready(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if op.Status() != "ready" || op.plan.Provenance.Data != "0x"+common.Bytes2Hex(op.data) || len(main.requests) != 1 || policy.calls != 1 {
+		t.Fatal("ready changed proof/signature or failed to bind final calldata")
+	}
+	// Model an unattempted ready journal from the former lifecycle.
+	if e = s.options.Store.Update(ctx, s.scope, func(state *WalletState) error {
+		r := state.Operations[op.ID()]
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(r.Plan, &fields); err != nil {
+			return err
+		}
+		delete(fields, "Provenance")
+		var err error
+		r.Plan, err = json.Marshal(fields)
+		state.Operations[op.ID()] = r
+		return err
+	}); e != nil {
+		t.Fatal(e)
+	}
+	op, e = s.Resume(ctx, op.ID())
+	if e != nil {
+		t.Fatal(e)
+	}
+	n := source.calls.Load()
+	if _, e = client.Submit(ctx, op); e == nil || source.calls.Load() != n || op.plan.Broadcaster.Request != nil {
+		t.Fatal("first submit repaired legacy missing evidence", e)
+	}
+	op, e = op.Ready(ctx)
+	if e != nil || source.calls.Load() != n+1 || len(main.requests) != 1 {
+		t.Fatal("explicit legacy ready could not finalize", e)
 	}
 }

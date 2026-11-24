@@ -47,13 +47,11 @@ func (c *Client) SubmissionRequirements(ctx context.Context, s SignedQuote) (boo
 	if s.Context == nil {
 		return false, errors.New("missing verified quote context")
 	}
-	var status ServiceStatus
-	if e := c.call(ctx, "broadcaster_getStatus", nil, &status); e != nil {
+	receipt, _ := c.preparationSnapshot()
+	status, e := c.readServiceStatus(ctx, *s.Context)
+	c.observePreparation(receipt, status, e)
+	if e != nil {
 		return false, e
-	}
-	chain, ok := new(big.Int).SetString(status.ChainID, 10)
-	if !ok || status.APIVersion != "v1" || status.ProtocolVersion != "1" || chain.Cmp(s.Context.ChainID) != 0 || status.Protocol != s.Context.Protocol || status.Sender != c.configuration.QuoteSigner || status.FeeRecipient != c.configuration.FeeRecipient {
-		return false, errors.New("invalid broadcaster service status")
 	}
 	if status.SubmissionHalted {
 		return false, errors.New("broadcaster submission halted")
@@ -69,35 +67,26 @@ func (c *Client) SubmissionRequirements(ctx context.Context, s SignedQuote) (boo
 }
 
 func (c *Client) SupportsToken(ctx context.Context, token common.Address, trust Trust) (bool, error) {
-	if token == (common.Address{}) || trust.ChainID == nil {
-		return false, errors.New("token and deployment context required")
-	}
-	var raw struct {
-		ServiceStatus
-		TokenAddress common.Address `json:"tokenAddress"`
-		Supported    bool           `json:"supported"`
-	}
-	if e := c.call(ctx, "broadcaster_getTokenSupport", map[string]any{"tokenAddress": token.Hex()}, &raw); e != nil {
-		return false, e
-	}
-	n, ok := new(big.Int).SetString(raw.ChainID, 10)
-	if !ok || raw.APIVersion != "v1" || raw.ProtocolVersion != "1" || n.Cmp(trust.ChainID) != 0 || raw.Protocol != trust.Protocol || raw.Sender != c.configuration.QuoteSigner || raw.FeeRecipient != c.configuration.FeeRecipient || raw.TokenAddress != token {
-		return false, errors.New("invalid broadcaster token support")
-	}
-	return !raw.SubmissionHalted && raw.Supported, nil
+	receipt, _ := c.preparationSnapshot()
+	supported, status, err := c.tokenSupport(ctx, token, trust)
+	c.observePreparation(receipt, status, err)
+	return supported, err
 }
 
 func (c *Client) ServiceStatus(ctx context.Context, trust Trust) (ServiceStatus, error) {
-	var status ServiceStatus
-	if e := c.call(ctx, "broadcaster_getStatus", nil, &status); e != nil {
-		return status, e
-	}
-	return c.checkedServiceStatus(status, trust)
+	receipt, _ := c.preparationSnapshot()
+	status, err := c.readServiceStatus(ctx, trust)
+	c.observePreparation(receipt, status, err)
+	return status, err
 }
+
 func (c *Client) checkedServiceStatus(status ServiceStatus, trust Trust) (ServiceStatus, error) {
 	n, ok := new(big.Int).SetString(status.ChainID, 10)
 	if !ok || trust.ChainID == nil || n.Cmp(trust.ChainID) != 0 || status.Protocol != trust.Protocol || status.Sender != c.configuration.QuoteSigner || status.FeeRecipient != c.configuration.FeeRecipient || status.APIVersion != "v1" || status.ProtocolVersion != "1" {
 		return status, errors.New("invalid broadcaster service status")
+	}
+	if status.FeeLock != nil && (status.FeeLock.Version != "1" || status.FeeLock.Model != feeLockModel) {
+		return status, errors.New("unsupported fee lock capability")
 	}
 	if status.Scheduling.Enabled {
 		for _, v := range []string{status.Scheduling.MaxDelaySeconds, status.Scheduling.DefaultExecutionWindowSeconds, status.Scheduling.MaxExecutionWindowSeconds} {

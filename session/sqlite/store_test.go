@@ -107,3 +107,45 @@ func TestSQLiteRevisionMatchesAuthenticatedStateAndRejectsMismatch(t *testing.T)
 		t.Fatal("updated from mismatched revision")
 	}
 }
+
+func TestSubmissionWatchSharesSQLiteDatabaseAndScope(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	codec, err := session.NewEncryptedWalletCodec(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := NewWalletStore(ctx, db, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewWalletStore(ctx, db, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, err := NewPublicHistoryStore(ctx, db, session.PublicRetention{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := session.WalletScope{ChainID: 1}
+	walletWatch := a.ObserveScopeWrites(scope.Key())
+	publicWatch := public.ObserveScopeWrites(scope.Key())
+	if err := b.Update(ctx, scope, func(s *session.WalletState) error { s.Invalidated = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !walletWatch() || publicWatch() {
+		t.Fatal("unexpected wallet or public observation")
+	}
+	walletWatch = a.ObserveScopeWrites(scope.Key())
+	publicWatch = public.ObserveScopeWrites(scope.Key())
+	if err := public.Update(ctx, scope.Key(), func(s *session.PublicHistoryState) error { s.Generation++; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if walletWatch() || !publicWatch() {
+		t.Fatal("wallet and public store windows crossed")
+	}
+}

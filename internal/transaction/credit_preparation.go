@@ -62,6 +62,9 @@ func (i *Invisi) creditBuilder(ctx context.Context, identity TransactionIdentity
 	var block protocolrpc.CanonicalBlock
 	roots := map[uint64]common.Hash{}
 	return credit.PreparationBuilder{
+		CaptureSendNetwork: func() func(context.Context) error {
+			return r.Protocol.CaptureSendNetwork(func() protocolrpc.ChainProvider { return i.options.Provider })
+		},
 		ChainTimestamp: func(ctx context.Context) (uint64, error) {
 			if i.options.Provider == nil {
 				return 0, errors.New("current Credit chain provider required")

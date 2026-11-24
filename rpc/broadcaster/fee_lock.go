@@ -2,7 +2,6 @@ package broadcaster
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"math/big"
 	"strconv"
@@ -91,24 +90,12 @@ func VerifyFeeLock(ticket SignedFeeLock, trust Trust, token, recipient common.Ad
 // ForPreparation returns an isolated pricing client. It never mutates shared clients.
 // Missing advertised capability retains the legacy protocol; lock failures never downgrade.
 func (c *Client) ForPreparation(ctx context.Context, data []byte, trust Trust) (*Client, error) {
-	var raw json.RawMessage
-	if err := c.call(ctx, "broadcaster_getStatus", nil, &raw); err != nil {
-		return nil, err
-	}
-	var status ServiceStatus
-	if err := json.Unmarshal(raw, &status); err != nil {
-		return nil, err
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return nil, err
-	}
-	if value, present := fields["feeLock"]; present && string(value) == "null" {
-		return nil, errors.New("invalid fee lock capability")
-	}
-	status, err := c.checkedServiceStatus(status, trust)
+	status, receipt, err := c.preparationStatus(ctx, trust)
 	if err != nil {
 		return nil, err
+	}
+	if status.SubmissionHalted {
+		return nil, errors.New("broadcaster submission halted")
 	}
 	if status.FeeLock == nil {
 		return c, nil
@@ -120,25 +107,70 @@ func (c *Client) ForPreparation(ctx context.Context, data []byte, trust Trust) (
 	if !cap.Core {
 		return c, nil
 	}
-	if status.SubmissionHalted {
-		return nil, errors.New("broadcaster submission halted")
-	}
-	var ticket SignedFeeLock
-	if err = c.call(ctx, "broadcaster_lockFee", map[string]any{"data": hexutil.Encode(data)}, &ticket); err != nil {
-		return nil, err
-	}
 	trust.Signer = c.configuration.QuoteSigner
 	request, err := DecodeIntent(data)
 	if err != nil {
 		return nil, err
 	}
+	// Only initialized, still-active authority may retain a tariff. Each scoped
+	// client receives its own value copy, so it cannot mutate or replace the slot.
+	var entry *preparationFeeLock
+	var fetch uint64
+	if receipt != nil {
+		a := c.preparation
+		a.mu.Lock()
+		entry = a.ticket
+		a.mu.Unlock()
+		if entry != nil && entry.receipt == receipt && entry.token == request.Token {
+			if VerifyFeeLock(entry.ticket, trust, request.Token, c.configuration.FeeRecipient, uint64(time.Now().Unix())) != nil {
+				c.evictFeeLock(entry)
+				entry = nil
+			}
+		} else {
+			entry = nil
+		}
+		if entry == nil {
+			a.mu.Lock()
+			a.fetch++
+			fetch = a.fetch
+			a.mu.Unlock()
+		}
+	}
+	var ticket SignedFeeLock
+	if entry != nil {
+		ticket = entry.ticket
+	} else {
+		if err = c.call(ctx, "broadcaster_lockFee", map[string]any{"data": hexutil.Encode(data)}, &ticket); err != nil {
+			return nil, err
+		}
+	}
 	if err = VerifyFeeLock(ticket, trust, request.Token, c.configuration.FeeRecipient, uint64(time.Now().Unix())); err != nil {
+		c.evictFeeLock(entry)
 		return nil, err
 	}
+	if receipt != nil {
+		if err = c.checkPreparation(ctx, receipt); err != nil {
+			return nil, err
+		}
+		if entry == nil {
+			entry = &preparationFeeLock{receipt: receipt, token: request.Token, ticket: ticket}
+			a := c.preparation
+			a.mu.Lock()
+			if a.current == receipt && a.fetch == fetch {
+				a.ticket = entry
+			}
+			a.mu.Unlock()
+		}
+	}
 	trust.ChainID = new(big.Int).Set(trust.ChainID)
-	return &Client{configuration: c.configuration, http: c.http, feeLock: &ticket, feeLockTrust: &trust}, nil
+	return &Client{preparation: c.preparation, preparationReceipt: receipt, configuration: c.configuration, http: c.http, feeLock: &ticket, feeLockTrust: &trust, feeLockEntry: entry}, nil
 }
 func (c *Client) addFeeLock(params map[string]any, data []byte) error {
+	if receipt, bound := c.preparationSnapshot(); bound {
+		if err := c.checkPreparation(context.Background(), receipt); err != nil {
+			return err
+		}
+	}
 	if c.feeLock == nil {
 		return nil
 	}
@@ -147,8 +179,42 @@ func (c *Client) addFeeLock(params map[string]any, data []byte) error {
 		return err
 	}
 	if err = VerifyFeeLock(*c.feeLock, *c.feeLockTrust, request.Token, c.configuration.FeeRecipient, uint64(time.Now().Unix())); err != nil {
+		c.evictFeeLock(c.feeLockEntry)
 		return err
 	}
 	params["feeLock"] = *c.feeLock
 	return nil
+}
+
+// preparationFeeLock is an immutable, in-memory tariff under one exact receipt.
+// It deliberately carries no intent, authorization, or persisted operation data.
+type preparationFeeLock struct {
+	receipt *preparationCapability
+	token   common.Address
+	ticket  SignedFeeLock
+}
+
+func (c *Client) evictFeeLock(entry *preparationFeeLock) {
+	if entry == nil || c.preparation == nil {
+		return
+	}
+	a := c.preparation
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.ticket == entry {
+		a.ticket = nil
+		a.fetch++
+	}
+}
+
+func (c *Client) rejectFeeLock(err error) {
+	var rpc *RPCError
+	if !errors.As(err, &rpc) {
+		return
+	}
+	if (rpc.Code == -32040 && rpc.Message == "FEE_LOCK_EXPIRED") ||
+		(rpc.Code == -32041 && rpc.Message == "FEE_LOCK_INVALID") ||
+		(rpc.Code == -32042 && rpc.Message == "FEE_LOCK_GAS_EXCEEDED") {
+		c.evictFeeLock(c.feeLockEntry)
+	}
 }

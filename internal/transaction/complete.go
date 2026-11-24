@@ -2,10 +2,16 @@ package transaction
 
 import (
 	"context"
+
+	protocolrpc "github.com/invisi-labs/invisi-sdk-go/rpc"
 )
 
 func (s *Runtime) PersistPlan(ctx context.Context, plan Plan) (*Execution, error) {
-	if e := s.Canonical(ctx, plan.Block); e != nil {
+	return s.persistPlan(ctx, plan, s.Canonical)
+}
+
+func (s *Runtime) persistPlan(ctx context.Context, plan Plan, checkCanonical func(context.Context, protocolrpc.CanonicalBlock) error) (*Execution, error) {
+	if e := checkCanonical(ctx, plan.Block); e != nil {
 		return nil, e
 	}
 	id, e := RandomOperationID()
@@ -17,6 +23,9 @@ func (s *Runtime) PersistPlan(ctx context.Context, plan Plan) (*Execution, error
 	}
 	plan.ID = id
 	plan.Version = 1
+	if plan.RetainedShieldAnchor {
+		plan.Version = 2
+	}
 	plan.OwnerAddress = s.Wallet.ownerAddress
 	plan.Namespace = s.Scope.Namespace
 	plan, e = ClonePlan(plan)

@@ -42,6 +42,7 @@ type Prepared struct {
 	mu                          sync.Mutex
 	intent                      Intent
 	chainTimestamp              func(context.Context) (uint64, error)
+	captureSendNetwork          func() func(context.Context) error
 	authority                   *Authority
 	proof                       *prover.ProofBundle
 	revokeSignature             []byte

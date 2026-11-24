@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/invisi-labs/invisi-sdk-go/internal/storewatch"
 	"github.com/invisi-labs/invisi-sdk-go/session"
 	creditsession "github.com/invisi-labs/invisi-sdk-go/session/credit"
 )
 
 func (s *WalletStore) RestoreExternalizedOperations(ctx context.Context, scope session.WalletScope) error {
+	defer storewatch.Write(s.db, "wallet/"+scope.Key())()
 	before := uint64(^uint64(0) >> 1)
 	for {
 		rows, e := s.db.QueryContext(ctx, "SELECT locator,data,sequence FROM invisi_wallet_records WHERE scope_key=? AND archived=1 AND kind IN ('operations','credit-operations') AND sequence<? ORDER BY sequence DESC LIMIT 128", scope.Key(), before)

@@ -87,7 +87,7 @@ func reprice(i Intent, recipient common.Address, amount *big.Int) (Intent, error
 		if next.Create.HasInitialPayment != nil && *next.Create.HasInitialPayment {
 			if next.InitialPaymentNetAmount != nil {
 				if next.InitialPaymentCreationDelivery == nil {
-					return Intent{}, fmt.Errorf("original creation state required for net repricing")
+					return Intent{}, fmt.Errorf("%w with original creation state for net repricing", broadcaster.ErrReprepareRequired)
 				}
 				total := new(big.Int).Add(next.InitialPaymentNetAmount, fee)
 				if total.BitLen() > 126 {
@@ -119,8 +119,11 @@ func reprice(i Intent, recipient common.Address, amount *big.Int) (Intent, error
 				next.Create.TotalAmount = total
 				copy(next.Deliveries, ds)
 			}
-			if fee.Cmp(next.Create.TotalAmount) >= 0 || next.OutputNote == nil || next.NoteRecipientKeys == nil {
-				return Intent{}, fmt.Errorf("initial payment fee consumes Note or recipient keys missing")
+			if fee.Cmp(next.Create.TotalAmount) >= 0 {
+				return Intent{}, fmt.Errorf("initial payment fee consumes Note")
+			}
+			if next.OutputNote == nil || next.NoteRecipientKeys == nil {
+				return Intent{}, fmt.Errorf("%w with the initial payment Note and recipient keys", broadcaster.ErrReprepareRequired)
 			}
 			next.OutputNote.Amount = primitives.BigIntToElement(new(big.Int).Sub(next.Create.TotalAmount, fee))
 			commitment, e := primitives.ComputeNoteCommitment(next.Context.ChainID, next.Context.ProtocolAddress, next.OutputIdentity, next.OutputNote.TokenAddress, next.OutputNote.Amount)
@@ -163,7 +166,7 @@ func reprice(i Intent, recipient common.Address, amount *big.Int) (Intent, error
 			}
 			next.OutputNote.Amount = primitives.BigIntToElement(net)
 			if len(next.Deliveries[last].Ciphertext) > 0 && next.NoteRecipientKeys == nil {
-				return Intent{}, fmt.Errorf("fee quotation requires frozen Note recipient keys")
+				return Intent{}, fmt.Errorf("%w with frozen Note recipient keys", broadcaster.ErrReprepareRequired)
 			}
 			delivery, err := noteDelivery(*next.OutputNote, next.NoteRecipientKeys)
 			if err != nil {
@@ -171,7 +174,7 @@ func reprice(i Intent, recipient common.Address, amount *big.Int) (Intent, error
 			}
 			next.Deliveries[last] = delivery
 		} else if len(next.Deliveries[last].Ciphertext) > 0 || len(next.Deliveries[last].Clue) > 0 {
-			return Intent{}, fmt.Errorf("enveloped draw quotation requires PrepareDrawToNote")
+			return Intent{}, fmt.Errorf("%w with PrepareDrawToNote for an enveloped draw", broadcaster.ErrReprepareRequired)
 		}
 	default:
 		return Intent{}, fmt.Errorf("Credit operation required")
@@ -421,9 +424,14 @@ func (p *Prepared) submitViaBroadcaster(ctx context.Context, client *broadcaster
 	if client == nil || binding == nil || binding.Configuration != client.Configuration() {
 		return broadcaster.Status{}, fmt.Errorf("use the originally selected broadcaster")
 	}
+	policyGuard := client.SubmissionPolicyGuard()
 	retry := known.State != ""
 	if retry && known.RequestID != "" {
 		return client.Status(ctx, known.RequestID)
+	}
+	var checkNetwork func(context.Context) error
+	if !retry && p.captureSendNetwork != nil {
+		checkNetwork = p.captureSendNetwork()
 	}
 	if !retry {
 		if err := p.CheckCurrentTimestamp(ctx); err != nil {
@@ -483,6 +491,11 @@ func (p *Prepared) submitViaBroadcaster(ctx context.Context, client *broadcaster
 	p.request = request
 	p.submission.State = "uncertain"
 	p.mu.Unlock()
+	if firstAttempt {
+		if err := policyGuard(ctx, checkNetwork); err != nil {
+			return broadcaster.Status{}, err
+		}
+	}
 	status, err := client.SubmitPrepared(ctx, *request)
 	if err != nil {
 		var refusal *broadcaster.SubmissionRefusedError

@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 func (c *ProtocolRpcClient) GetChains(ctx context.Context) ([]Chain, error) {
@@ -41,6 +44,64 @@ func (c *ProtocolRpcClient) GetChains(ctx context.Context) ([]Chain, error) {
 }
 
 func (c *ProtocolRpcClient) GetDeployment(ctx context.Context, chain uint64) (ProtocolDeployment, error) {
+	c.deploymentRequests.Add(1)
+	return c.getDeployment(ctx, chain)
+}
+
+// DeploymentObservation identifies a successful service lookup and its HTTP
+// policy. A new lookup on the original client or a provider clone retires it.
+type DeploymentObservation struct {
+	requests    *atomic.Uint64
+	request     uint64
+	ownedPolicy bool
+}
+
+// Current reports whether no newer deployment lookup has started.
+func (o *DeploymentObservation) Current() bool {
+	return o != nil && o.requests != nil && o.requests.Load() == o.request
+}
+
+// Reusable reports whether a later initialization may use this observation.
+func (o *DeploymentObservation) Reusable() bool { return o.Current() && o.ownedPolicy }
+
+// VerifyDeployment contacts the selected service and checks the complete
+// deployment. A matching response still succeeds when requests overlap. Callers
+// publishing a capability must check Current because a newer lookup may have
+// retired this observation, including before this method returns.
+func (c *ProtocolRpcClient) VerifyDeployment(ctx context.Context, expected ProtocolDeployment) (*DeploymentObservation, error) {
+	return c.verifyDeployment(ctx, expected, c.deploymentRequests.Add(1))
+}
+
+// BeginDeploymentVerification reserves the request generation immediately. The
+// returned function performs the lookup once, allowing callers to order the
+// start of a request with local state changes without holding a lock during I/O.
+func (c *ProtocolRpcClient) BeginDeploymentVerification(ctx context.Context, expected ProtocolDeployment) func() (*DeploymentObservation, error) {
+	request := c.deploymentRequests.Add(1)
+	expected = cloneDeployment(expected)
+	return sync.OnceValues(func() (*DeploymentObservation, error) {
+		return c.verifyDeployment(ctx, expected, request)
+	})
+}
+
+func (c *ProtocolRpcClient) verifyDeployment(ctx context.Context, expected ProtocolDeployment, request uint64) (*DeploymentObservation, error) {
+	chain, err := expected.ChainNumber()
+	if err != nil {
+		return nil, err
+	}
+	d, err := c.getDeployment(ctx, chain.Uint64())
+	if err != nil {
+		return nil, err
+	}
+	if !reflect.DeepEqual(d, expected) {
+		return nil, errors.New("Protocol RPC deployment mismatch")
+	}
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
+	return &DeploymentObservation{requests: c.deploymentRequests, request: request, ownedPolicy: c.http.Transport == nativeServiceTransport}, nil
+}
+
+func (c *ProtocolRpcClient) getDeployment(ctx context.Context, chain uint64) (ProtocolDeployment, error) {
 	var response struct {
 		APIVersion      string             `json:"apiVersion"`
 		ProtocolVersion string             `json:"protocolVersion"`

@@ -3,6 +3,7 @@ package transaction
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
 	"strconv"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/invisi-labs/invisi-sdk-go/protocol"
 	"github.com/invisi-labs/invisi-sdk-go/protocol/settlement"
 	"github.com/invisi-labs/invisi-sdk-go/rpc/broadcaster"
+	"github.com/invisi-labs/invisi-sdk-go/rpc/chain"
 )
 
 type FundingPermitRequest = broadcaster.FundingPermitRequest
@@ -29,6 +31,10 @@ type ScheduleOptions = broadcaster.ScheduleOptions
 type BroadcasterQuoteOptions = broadcaster.QuoteOptions
 
 type BroadcasterPlan struct {
+	// Successful local quote receipt; JSON recovery deliberately discards it.
+	nativeBinding         *chain.HTTPBinding
+	nativeEpoch           uint64
+	SubmissionRefusal     string `json:"submissionRefusal,omitempty"`
 	CancelToken           string `json:"cancelToken,omitempty"`
 	CancellationConfirmed bool   `json:"cancellationConfirmed,omitempty"`
 	Configuration         broadcaster.Configuration
@@ -76,8 +82,16 @@ func (o *Execution) QuoteBroadcaster(ctx context.Context, c *broadcaster.Client,
 	if c == nil {
 		return errors.New("broadcaster client required")
 	}
-	if o.Status != "prepared" || o.Bundle != nil || o.Authorization != nil || o.Plan.Broadcaster != nil || o.Plan.Target == "noir-recursive" {
+	quoteBinding, _ := o.Runtime.Options.Provider.(*chain.HTTPBinding)
+	var quoteEpoch uint64
+	if quoteBinding != nil {
+		quoteEpoch = quoteBinding.Epoch()
+	}
+	if o.Status != "prepared" || o.PriorExternalized || len(o.Plan.Funding.Signature) > 0 || o.Bundle != nil || o.Authorization != nil || o.Plan.Broadcaster != nil || o.Plan.Target == "noir-recursive" {
 		return errors.New("broadcaster must be selected before authorization and proving")
+	}
+	if o.Plan.Funding.Amount != nil && o.Plan.Funding.Amount.Sign() > 0 && (o.Plan.FundingMode != "signature" || o.Plan.Funding.SigNonce == nil || o.Plan.Funding.Deadline == nil || o.Plan.Funding.Deadline.Sign() <= 0) {
+		return fmt.Errorf("%w with signature funding before selecting a broadcaster", broadcaster.ErrReprepareRequired)
 	}
 	switch o.Plan.Kind {
 	case "shield", "transact":
@@ -154,7 +168,16 @@ func (o *Execution) QuoteBroadcaster(ctx context.Context, c *broadcaster.Client,
 	if e != nil {
 		return e
 	}
-	initial, e := o.BroadcasterIntent()
+	// Price paid execution features without changing the business plan.
+	initialPlan, e := ClonePlan(base)
+	if e != nil {
+		return e
+	}
+	if base.Kind == "shield" || base.Kind == "transact" {
+		SetPlanFee(&initialPlan, c.Configuration().FeeRecipient, big.NewInt(1))
+	}
+	initialExecution := Execution{Plan: initialPlan, Runtime: o.Runtime}
+	initial, e := initialExecution.BroadcasterIntent()
 	if e != nil {
 		return e
 	}
@@ -180,6 +203,32 @@ func (o *Execution) QuoteBroadcaster(ctx context.Context, c *broadcaster.Client,
 		data, e := o.BroadcasterIntent()
 		if e != nil {
 			return e
+		}
+		plainShield := base.Kind == "shield" && schedule == nil && opt.FundingPermit == nil && (base.Funding.Permit.Deadline == nil || base.Funding.Permit.Deadline.Sign() == 0)
+		if plainShield {
+			trust := broadcaster.Trust{ChainID: o.Plan.Context.ChainID, Protocol: o.Plan.Context.ProtocolAddress}
+			signed, quoteErr := c.GetQuote(ctx, data, trust)
+			if quoteErr != nil {
+				var refusal *broadcaster.RPCError
+				if !errors.As(quoteErr, &refusal) || refusal.Code != -32000 || attempt+1 >= opt.MaxAttempts {
+					return quoteErr
+				}
+				refreshed, err := c.EstimateQuote(ctx, data)
+				if err != nil {
+					return err
+				}
+				next, _ := new(big.Int).SetString(refreshed.FeeAmount, 10)
+				if next.Cmp(opt.MaxFeeAmount) > 0 {
+					return errors.New("broadcaster fee exceeds maximum")
+				}
+				if next.Cmp(amount) <= 0 {
+					return quoteErr
+				}
+				amount = next
+				continue
+			}
+			o.Plan.Broadcaster = &BroadcasterPlan{Configuration: c.Configuration(), Signed: signed, ChainID: new(big.Int).Set(trust.ChainID), Protocol: trust.Protocol, Intent: append([]byte{}, data...)}
+			return o.commitQuotedLifetime(ctx, quoteBinding, quoteEpoch)
 		}
 		required, e := c.EstimateQuote(ctx, data, schedule)
 		if e != nil {
@@ -229,7 +278,7 @@ func (o *Execution) QuoteBroadcaster(ctx context.Context, c *broadcaster.Client,
 		}
 
 		o.Plan.Broadcaster = &BroadcasterPlan{CancelToken: cancelToken, Configuration: c.Configuration(), Signed: signed, ChainID: new(big.Int).Set(trust.ChainID), Protocol: trust.Protocol, Intent: append([]byte{}, data...)}
-		return o.CommitBroadcasterPlan(ctx)
+		return o.commitQuotedLifetime(ctx, quoteBinding, quoteEpoch)
 	}
 	return errors.New("broadcaster fee did not converge")
 }
@@ -266,3 +315,15 @@ func validateScheduledDeadlines(data []byte, minimum *big.Int) error {
 
 func (BroadcasterPlan) String() string     { return "BroadcasterPlan([sensitive])" }
 func (b BroadcasterPlan) GoString() string { return b.String() }
+
+func (o *Execution) commitQuotedLifetime(ctx context.Context, binding *chain.HTTPBinding, epoch uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if binding != nil && binding.Epoch() != epoch {
+		return errors.New("HTTP binding changed during quote preparation")
+	}
+	o.Plan.Broadcaster.nativeBinding = binding
+	o.Plan.Broadcaster.nativeEpoch = epoch
+	return o.CommitBroadcasterPlan(ctx)
+}

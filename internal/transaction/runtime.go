@@ -2,7 +2,6 @@ package transaction
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 
 	"github.com/invisi-labs/invisi-sdk-go/rpc/chain"
@@ -29,23 +28,40 @@ type RuntimeOptions struct {
 	FundingSigner FundingSigner
 	Signer        *bind.TransactOpts
 }
+
+// ShieldPreparationReceipt is a process-local capability supplied by a managed
+// session. Check verifies its wallet, connection lifetime and real capture.
+type ShieldPreparationReceipt struct {
+	Block protocolrpc.CanonicalBlock
+	Token common.Address
+	Check func(context.Context, *Runtime) error
+}
+
 type Runtime struct {
-	Snapshot          *PreparationSnapshot
-	Options           RuntimeOptions
-	Wallet            *Wallet
-	Protocol          *chain.Protocol
-	Scope             WalletScope
-	RPC               *protocolrpc.ProtocolRpcClient
-	ExplicitInventory *Inventory
-	ChangeAddress     string
-	InventoryReader   func(context.Context) (Inventory, error)
-	SummaryReader     func(context.Context) (Inventory, error)
-	OnComplete        func(context.Context, *Execution) error
-	OnPersist         func(context.Context, *Execution, string) error
-	OnLease           func(context.Context, *Execution) error
-	OnInvalidate      func(context.Context) error
-	OnReprice         func(context.Context, *Execution) error
-	OnExternalize     func(context.Context, *Execution) error
+	// Only ResolveRuntime sets this after its live lookup. A restored snapshot
+	// supplies neither service provenance nor a native connection epoch.
+	serviceObservation *protocolrpc.DeploymentObservation
+	serviceEpoch       uint64
+	Snapshot           *PreparationSnapshot
+	ShieldPreparation  *ShieldPreparationReceipt
+	Options            RuntimeOptions
+	Wallet             *Wallet
+	Protocol           *chain.Protocol
+	Scope              WalletScope
+	RPC                *protocolrpc.ProtocolRpcClient
+	ExplicitInventory  *Inventory
+	ChangeAddress      string
+	InventoryReader    func(context.Context) (Inventory, error)
+	SummaryReader      func(context.Context) (Inventory, error)
+	OnComplete         func(context.Context, *Execution) error
+	OnPersist          func(context.Context, *Execution, string) error
+	OnLease            func(context.Context, *Execution) error
+	OnInvalidate       func(context.Context) error
+	OnReprice          func(context.Context, *Execution) error
+	OnExternalize      func(context.Context, *Execution) error
+	SendProvider       func() protocolrpc.ChainProvider
+	ObserveSendWrites  func() func() bool
+	SendGeneration     func(context.Context, *Execution) (uint64, error)
 }
 
 func (i *Invisi) GetInfrastructure() InvisiOptions {
@@ -76,6 +92,11 @@ func ResolveRuntime(ctx context.Context, infrastructure InvisiOptions, wallet Wa
 	if e != nil {
 		return nil, e
 	}
+	binding, _ := infrastructure.Provider.(*chain.HTTPBinding)
+	var epoch uint64
+	if binding != nil {
+		epoch = binding.Epoch()
+	}
 	if e = pool.ValidateDeployment(ctx, infrastructure.Provider); e != nil {
 		return nil, e
 	}
@@ -83,16 +104,20 @@ func ResolveRuntime(ctx context.Context, infrastructure InvisiOptions, wallet Wa
 	if scope.Namespace == "" {
 		scope.Namespace = "default"
 	}
-	deployment, e := infrastructure.ProtocolRPC.GetDeployment(ctx, scope.ChainID)
+	observation, e := infrastructure.ProtocolRPC.VerifyDeployment(ctx, pool.Deployment())
 	if e != nil {
 		return nil, e
 	}
-	expected, _ := json.Marshal(pool.Deployment())
-	actual, _ := json.Marshal(deployment)
-	if string(expected) != string(actual) {
-		return nil, errors.New("Protocol RPC deployment mismatch")
+	return &Runtime{Options: RuntimeOptions{InvisiOptions: infrastructure}, Wallet: w, Protocol: pool, Scope: scope, RPC: infrastructure.ProtocolRPC.WithProvider(infrastructure.Provider), serviceEpoch: epoch, serviceObservation: observation}, nil
+}
+
+// InitializedServiceDeployment returns the original live observation only for
+// the selected runtime client, immutable deployment and native connection epoch.
+func (r *Runtime) InitializedServiceDeployment(binding *chain.HTTPBinding, rpc *protocolrpc.ProtocolRpcClient, pool *chain.Protocol) *protocolrpc.DeploymentObservation {
+	if r == nil || binding == nil || r.Options.Provider != binding || r.RPC != rpc || r.Protocol != pool || binding.Epoch() != r.serviceEpoch || !r.serviceObservation.Reusable() {
+		return nil
 	}
-	return &Runtime{Options: RuntimeOptions{InvisiOptions: infrastructure}, Wallet: w, Protocol: pool, Scope: scope, RPC: infrastructure.ProtocolRPC.WithProvider(infrastructure.Provider)}, nil
+	return r.serviceObservation
 }
 func (r *Runtime) Invalidate(ctx context.Context) error {
 	if r.OnInvalidate != nil {

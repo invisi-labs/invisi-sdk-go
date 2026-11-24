@@ -5,6 +5,9 @@ import (
 	"errors"
 	transaction "github.com/invisi-labs/invisi-sdk-go/internal/transaction"
 
+	"github.com/invisi-labs/invisi-sdk-go/internal/storewatch"
+	protocolrpc "github.com/invisi-labs/invisi-sdk-go/rpc"
+	"github.com/invisi-labs/invisi-sdk-go/rpc/chain"
 	creditsession "github.com/invisi-labs/invisi-sdk-go/session/credit"
 )
 
@@ -14,7 +17,7 @@ func (s *WalletSession) Credit() (*creditsession.Session, error) {
 		return nil, errors.New("managed wallet store required")
 	}
 	coreContext := s.coreContext()
-	return creditsession.New(creditsession.Options{ChainTimestamp: func(ctx context.Context) (uint64, error) {
+	return creditsession.New(creditsession.Options{CaptureSendGuard: s.captureCreditSendGuard, ChainTimestamp: func(ctx context.Context) (uint64, error) {
 		if s.options.Provider == nil {
 			return 0, errors.New("current Credit chain provider required")
 		}
@@ -29,7 +32,56 @@ func (s *WalletSession) Credit() (*creditsession.Session, error) {
 	}, WrapPreparation: transaction.WrapPreparation, Build: s.buildCreditRequest, Store: creditStoreAdapter{session: s}, OwnerAddress: s.scope.OwnerAddress, Context: &coreContext, Validate: s.validateCreditIntent, CheckCancellation: s.checkCreditCancellation, Prepare: s.prepareCreditIntent, ValidatePreparation: s.validateCreditPreparation, CheckPreparation: s.checkCreditPreparation, VerifyRevocation: s.verifyCreditRevocation})
 }
 
+func (s *WalletSession) captureCreditSendGuard(ctx context.Context, id, worker string) (func(context.Context) error, error) {
+	state, err := s.fencedSnapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if state.Invalidated {
+		return nil, errors.New("wallet history is invalidated")
+	}
+	generation := state.Scan.Generation
+	checkNetwork := s.protocol.CaptureSendNetwork(func() protocolrpc.ChainProvider { return s.options.Provider })
+	binding, _ := s.options.Provider.(*chain.HTTPBinding)
+	var epoch uint64
+	if binding != nil {
+		epoch = binding.Epoch()
+	}
+	check := func(ctx context.Context) error {
+		// An owned HTTP binding has a finite epoch we can compare after the
+		// wallet store returns. An eventless provider needs the real read last.
+		if binding != nil {
+			if err := checkNetwork(ctx); err != nil {
+				return err
+			}
+		}
+		current, err := s.fencedSnapshot(ctx)
+		if err != nil {
+			return err
+		}
+		record, ok := current.PostpaidCredit.Operations[id]
+		if !ok || record.WorkerID != worker || current.Invalidated || current.Scan.Generation != generation {
+			return errors.New("Credit wallet authority changed after freezing the request")
+		}
+		if binding != nil {
+			if s.options.Provider != binding || binding.Epoch() != epoch {
+				return errors.New("Credit provider changed after freezing the request")
+			}
+			return ctx.Err()
+		}
+		return checkNetwork(ctx)
+	}
+	return func(ctx context.Context) error {
+		finish := s.runtime.ObserveSendWrites()
+		return storewatch.Check(finish, func() error { return check(ctx) })
+	}, nil
+}
+
 type creditStoreAdapter struct{ session *WalletSession }
+
+func (a creditStoreAdapter) ObserveScopeWrites(string) func() bool {
+	return a.session.runtime.ObserveSendWrites()
+}
 
 func (a creditStoreAdapter) ReadSnapshot(ctx context.Context) (creditsession.State, error) {
 	state, err := a.session.fencedSnapshot(ctx)

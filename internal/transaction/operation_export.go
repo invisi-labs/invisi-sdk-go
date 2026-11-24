@@ -112,10 +112,16 @@ func (o *Execution) validateCachedSubmission(ctx context.Context, block *big.Int
 			return err
 		}
 		verifier := o.Runtime.Options.FundingVerifier
+		var valid bool
 		if verifier == nil {
-			verifier = GethFundingVerifier{Provider: provider}
+			// ValidateExport has just validated this same provider against the
+			// deployment. Reuse only its chain identity, not signature validity.
+			chain := new(big.Int).SetUint64(o.Runtime.Protocol.Context().ChainID)
+			valid, err = verifyTypedDataOnChain(ctx, provider, chain, o.Plan.Funding.Payer, typed, o.Plan.Funding.Signature, "funding")
+		} else {
+			// Explicit verifiers retain their own policy and network checks.
+			valid, err = verifier.VerifyTypedData(ctx, o.Plan.Funding.Payer, typed, o.Plan.Funding.Signature)
 		}
-		valid, err := verifier.VerifyTypedData(ctx, o.Plan.Funding.Payer, typed, o.Plan.Funding.Signature)
 		if err != nil {
 			return err
 		}
