@@ -286,6 +286,14 @@ func (p *Prepared) quoteBroadcaster(ctx context.Context, client *broadcaster.Cli
 			return e
 		}
 	}
+	initial, err := unsignedIntent(base)
+	if err != nil {
+		return err
+	}
+	client, err = client.ForPreparation(ctx, initial, broadcaster.Trust{ChainID: primitives.ElementToBigInt(base.Context.ChainID), Protocol: common.BigToAddress(primitives.ElementToBigInt(base.Context.ProtocolAddress))})
+	if err != nil {
+		return err
+	}
 	proposal := base
 	for attempt := 0; attempt < attempts; attempt++ {
 		data, err := unsignedIntent(proposal)

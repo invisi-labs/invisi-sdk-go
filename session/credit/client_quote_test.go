@@ -69,6 +69,8 @@ func TestClientQuoteManagedCreditRollbackAndResume(t *testing.T) {
 		}
 		var result any
 		switch request.Method {
+		case "broadcaster_getStatus":
+			result = broadcaster.ServiceStatus{APIVersion: "v1", ProtocolVersion: "1", ChainID: primitives.ElementToBigInt(intent.Context.ChainID).String(), Protocol: common.BigToAddress(primitives.ElementToBigInt(intent.Context.ProtocolAddress)), Sender: crypto.PubkeyToAddress(key.PublicKey), FeeRecipient: collector}
 		case "broadcaster_estimateQuote":
 			result = broadcaster.Fee{FeeRecipient: collector, FeeAmount: "1", MaxGas: "2000000"}
 		case "broadcaster_getQuote":

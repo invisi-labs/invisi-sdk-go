@@ -161,6 +161,10 @@ func (o *Execution) QuoteBroadcaster(ctx context.Context, c *broadcaster.Client,
 	if e = validateScheduledDeadlines(initial, scheduleMinimum); e != nil {
 		return e
 	}
+	c, e = c.ForPreparation(ctx, initial, broadcaster.Trust{ChainID: o.Plan.Context.ChainID, Protocol: o.Plan.Context.ProtocolAddress})
+	if e != nil {
+		return e
+	}
 	fee, e := c.EstimateQuote(ctx, initial, schedule)
 	if e != nil {
 		return e

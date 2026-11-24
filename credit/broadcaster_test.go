@@ -306,12 +306,16 @@ func TestCreditFeeAttemptBoundsAndDefault(t *testing.T) {
 			calls := 0
 			collector := common.HexToAddress("0x1234")
 			transport := creditRoundTrip(func(r *http.Request) (*http.Response, error) {
-				calls++
 				var req struct {
 					ID     uint64
 					Method string
 				}
 				json.NewDecoder(r.Body).Decode(&req)
+				if req.Method == "broadcaster_getStatus" {
+					raw, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"apiVersion": "v1", "protocolVersion": "1", "chainId": primitives.ElementToBigInt(c.ChainID).String(), "protocol": common.BigToAddress(primitives.ElementToBigInt(c.ProtocolAddress)), "sender": common.HexToAddress("0x11"), "feeRecipient": collector, "submissionHalted": false}})
+					return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(raw)))}, nil
+				}
+				calls++
 				if req.Method != "broadcaster_estimateQuote" {
 					t.Fatal(req.Method)
 				}

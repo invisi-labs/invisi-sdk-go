@@ -2,6 +2,7 @@ package broadcaster
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math/big"
 
@@ -17,7 +18,14 @@ type SchedulingCapabilities struct {
 	MinDeadlineSlackSeconds       string `json:"minDeadlineSlackSeconds"`
 }
 
+type FeeLockCapabilities struct {
+	Version string `json:"version"`
+	Model   string `json:"model"`
+	Core    bool   `json:"core"`
+	Router  bool   `json:"router"`
+}
 type ServiceStatus struct {
+	FeeLock          *FeeLockCapabilities   `json:"feeLock,omitempty"`
 	Scheduling       SchedulingCapabilities `json:"scheduling"`
 	APIVersion       string                 `json:"apiVersion"`
 	ProtocolVersion  string                 `json:"protocolVersion"`
@@ -84,6 +92,9 @@ func (c *Client) ServiceStatus(ctx context.Context, trust Trust) (ServiceStatus,
 	if e := c.call(ctx, "broadcaster_getStatus", nil, &status); e != nil {
 		return status, e
 	}
+	return c.checkedServiceStatus(status, trust)
+}
+func (c *Client) checkedServiceStatus(status ServiceStatus, trust Trust) (ServiceStatus, error) {
 	n, ok := new(big.Int).SetString(status.ChainID, 10)
 	if !ok || trust.ChainID == nil || n.Cmp(trust.ChainID) != 0 || status.Protocol != trust.Protocol || status.Sender != c.configuration.QuoteSigner || status.FeeRecipient != c.configuration.FeeRecipient || status.APIVersion != "v1" || status.ProtocolVersion != "1" {
 		return status, errors.New("invalid broadcaster service status")
@@ -100,4 +111,22 @@ func (c *Client) ServiceStatus(ctx context.Context, trust Trust) (ServiceStatus,
 		}
 	}
 	return status, nil
+}
+
+// A present capability must not silently become an absent/disabled one.
+func (c *FeeLockCapabilities) UnmarshalJSON(data []byte) error {
+	var value struct {
+		Version string `json:"version"`
+		Model   string `json:"model"`
+		Core    *bool  `json:"core"`
+		Router  *bool  `json:"router"`
+	}
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	if value.Core == nil || value.Router == nil {
+		return errors.New("invalid fee lock capability")
+	}
+	*c = FeeLockCapabilities{Version: value.Version, Model: value.Model, Core: *value.Core, Router: *value.Router}
+	return nil
 }

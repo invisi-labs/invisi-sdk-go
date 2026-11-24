@@ -24,6 +24,8 @@ type Configuration struct {
 }
 type Options struct{ HTTPClient *http.Client }
 type Client struct {
+	feeLock       *SignedFeeLock
+	feeLockTrust  *Trust
 	configuration Configuration
 	http          *http.Client
 	sequence      atomic.Uint64
@@ -131,6 +133,9 @@ func (c *Client) EstimateQuote(ctx context.Context, data []byte, schedules ...*S
 	if e := addSchedule(p, schedules); e != nil {
 		return Fee{}, e
 	}
+	if err := c.addFeeLock(p, data); err != nil {
+		return Fee{}, err
+	}
 	var f Fee
 	e := c.call(ctx, "broadcaster_estimateQuote", p, &f)
 	if e != nil {
@@ -159,6 +164,9 @@ func (c *Client) GetQuote(ctx context.Context, data []byte, trust Trust, schedul
 	if e != nil {
 		return s, e
 	}
+	if e := c.addFeeLock(params, data); e != nil {
+		return s, e
+	}
 	if e := c.call(ctx, "broadcaster_getQuote", params, &s); e != nil {
 		return s, e
 	}
@@ -171,6 +179,15 @@ func (c *Client) GetQuote(ctx context.Context, data []byte, trust Trust, schedul
 	}
 	if s.Quote.FeeRecipient != c.configuration.FeeRecipient {
 		return s, errors.New("unregistered fee recipient")
+	}
+	if c.feeLock != nil {
+		end, _ := decimal(c.feeLock.Lock.Deadline)
+		actual, _ := decimal(s.Quote.Deadline)
+		gas, _ := decimal(s.Quote.MaxGas)
+		limit, _ := decimal(c.feeLock.Lock.MaxGas)
+		if actual.Cmp(end) > 0 || gas.Cmp(limit) > 0 {
+			return s, errors.New("quote exceeds fee lock bounds")
+		}
 	}
 	trust.ChainID = new(big.Int).Set(trust.ChainID)
 	s.Context = &trust
