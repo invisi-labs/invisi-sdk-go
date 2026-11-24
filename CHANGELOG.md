@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.3.5
+
+Upgrade the complete eight-module cohort together: root SDK, primitives, protocol, prover, rpc, session, ipp and paymentrouter. Internal requirements and isolated module checks target `v1.3.5`.
+
+### Receiving keys and transaction stages
+
+- Derive the current v1 receiving key group from a verified owner signature of the fixed EIP-191 message. Support external signers and deterministic local initialization; keep private receiving material out of serialization and logs.
+- Preserve prepared transaction stages during quote installation, wallet authorization and proving. Retain the frozen fee ticket and exact submission recovery body across retries.
+- Recheck the final service/network generation before first submission; cached preparation and quotation preserve their request budgets without weakening the final network fence.
+
+### Scanning
+
+- Bind the explicit Chain RPC provider in public history construction, including automatically shared histories created by managed sessions and standalone discovery helpers. Fresh clients can scan and decrypt without prebinding the service client.
+
+### Compatibility
+
+- Payments use the complete public v1 `0i` receiving address. Initialize receiving keys independently and persist the resulting address and local viewing capability before payment; legacy derived receiving addresses must not be silently reused.
+- Retain the current Core ABI, circuits, authenticated resource pins and session storage schema. Release all eight module tags at one commit.
+
 ## 1.3.4
 
 Upgrade the complete eight-module cohort together: root SDK, primitives, protocol, prover, rpc, session, ipp and paymentrouter. Internal requirements and isolated module checks target `v1.3.4`.

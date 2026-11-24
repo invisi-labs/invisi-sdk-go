@@ -8,4 +8,29 @@ Tagged releases validate the canonical version, every internal dependency pin, a
 
 Release jobs require `!cancelled()` as well as successful verification. Cancelling a workflow therefore also cancels publication work; completed registry writes remain immutable.
 
-The current release cohort is **v1.3.3**: root SDK plus primitives, protocol, prover, rpc, session, ipp, and paymentrouter. Every internal module requirement uses the same version; optional modules publish only after their SDK and protocol dependencies.
+The current release cohort is **v1.3.5**: root SDK plus primitives, protocol, prover, rpc, session, ipp, and paymentrouter. Every internal module requirement uses the same version; optional modules publish only after their SDK and protocol dependencies.
+
+## v1.3.5 publication
+
+Run `python3 scripts/test-modules.py`, `python3 scripts/check-packages.py`, and
+`python3 scripts/release-notes.py v1.3.5` before publication. Release notes are
+rendered from the matching `CHANGELOG.md` section. Keep fee-lock model identifiers
+and historical changelog sections at their original versions.
+
+After the reviewed commit has reached `develop` and `main`, wait for successful
+push CI at that exact commit. Create all eight tags on that same commit:
+
+```sh
+for module in primitives protocol prover rpc session ipp paymentrouter; do
+  git tag "$module/v1.3.5" "$RELEASE_COMMIT"
+done
+git tag v1.3.5 "$RELEASE_COMMIT"
+git push --atomic origin \
+  primitives/v1.3.5 protocol/v1.3.5 prover/v1.3.5 rpc/v1.3.5 \
+  session/v1.3.5 ipp/v1.3.5 paymentrouter/v1.3.5 v1.3.5
+```
+
+The root-tag workflow validates all actual remote tags before publication and
+checks each isolated archive. Wait for the GitHub release workflow to finish,
+then resolve all eight modules at `v1.3.5` from a fresh consumer without local
+replacement directives before upgrading downstream applications.

@@ -3,10 +3,10 @@
 Go client for the current Invisi Protocol. Requires Go 1.26.1 or newer.
 
 ```sh
-go get github.com/invisi-labs/invisi-sdk-go@v1.3.4
+go get github.com/invisi-labs/invisi-sdk-go@v1.3.5
 ```
 
-Release target: **1.3.4**. Module versions are repository tags; preparing this source does not create `v1.3.4` or publish a release. The `go 1.26.1` directive remains the toolchain requirement. The SDK remains in the v1 series. Source synchronization does not publish a new module version or upgrade deployed contracts.
+Release target: **1.3.5**. Module versions are repository tags; preparing this source does not create `v1.3.5` or publish a release. The `go 1.26.1` directive remains the toolchain requirement. The SDK remains in the v1 series. Source synchronization does not publish a new module version or upgrade deployed contracts.
 
 ## Core contract bindings
 
@@ -14,7 +14,7 @@ Contract bindings follow the current `invisi-core` compiler artifacts: `InvisiCo
 
 ## Eight independently versioned modules
 
-All eight modules target **1.3.4**. Applications normally import the SDK's `sdk` package; backend services can depend only on the pure Protocol module and its Primitives dependency.
+All eight modules target **1.3.5**. Applications normally import the SDK's `sdk` package; backend services can depend only on the pure Protocol module and its Primitives dependency.
 
 | Module | Responsibility | Internal dependencies |
 | --- | --- | --- |
@@ -27,7 +27,7 @@ All eight modules target **1.3.4**. Applications normally import the SDK's `sdk`
 | `paymentrouter` | Optional four-mode native/ERC20 PaymentRouter, V3/0x routing, authorization and relay envelopes | SDK; protocol; geth |
 | `ipp` | Independent IPP protocol types, HTTP client and merchant helpers; Invisi transaction preparation through `ipp/invisi` | primitives; SDK for the Invisi adapter |
 
-Module paths use `github.com/invisi-labs/invisi-sdk-go/<name>`; the SDK uses the repository-root module path. Nested module release tags are `<name>/v1.3.4`; the root SDK tag is `v1.3.4`. The examples are a separate development module, not a public release package. No `core`, `runtime` or `protocolkit` compatibility module is retained.
+Module paths use `github.com/invisi-labs/invisi-sdk-go/<name>`; the SDK uses the repository-root module path. Nested module release tags are `<name>/v1.3.5`; the root SDK tag is `v1.3.5`. The examples are a separate development module, not a public release package. No `core`, `runtime` or `protocolkit` compatibility module is retained.
 
 Pure ABI/types are in `protocol/contracts`; network-bound geth clients are in `rpc/contracts`. Maintainers regenerate both from the same compiler ABIs with `go generate ./contracts` in the Protocol module. `session/credit` owns managed Credit state. `protocol/gas` owns receipt-calibrated local estimates, while final transaction simulation belongs to the application and deployment/operator pricing remains outside the pure module.
 
@@ -226,7 +226,7 @@ Tracked `session/provenance.RecoveryCoordinator` preparation uses `EvaluateTrans
 
 `python3 scripts/test-modules.py` creates a temporary workspace and runs boundary checks, race tests, vet and builds for all eight modules plus the private examples. `python3 scripts/check-packages.py` constructs isolated local-proxy archives and tests them without the workspace or sibling checkouts; unpublished versions never enter the global module cache. GitHub CI runs both commands. Native Noir/BB integration tests are opt-in and require explicit local tool paths.
 
-Workspace modules currently declare v1.3.4; no remote tags are created by these checks. Before standalone consumer builds can resolve the new version from GitHub, publish the required module tags in dependency order and refresh dependency checksums.
+Workspace modules currently declare v1.3.5; no remote tags are created by these checks. Before standalone consumer builds can resolve the new version from GitHub, publish the required module tags in dependency order and refresh dependency checksums.
 
 Managed `SendTransaction` requires a positive caller-supplied gas limit in the signer or `TransactionOptions.GasLimit`; it never triggers geth automatic gas simulation. Applications choose the submission budget.
 
