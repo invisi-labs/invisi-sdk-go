@@ -267,6 +267,7 @@ func NewPublicHistory(o PublicHistoryOptions) (*PublicHistory, error) {
 	if o.Protocol == nil || o.Provider == nil || o.ProtocolRPC == nil {
 		return nil, errors.New("public history connections required")
 	}
+	o.ProtocolRPC = o.ProtocolRPC.WithProvider(o.Provider)
 	if o.Store == nil {
 		o.Store = NewMemoryPublicHistoryStore(PublicRetention{})
 	}

@@ -319,3 +319,21 @@ func TestOfflineScanUsesOlderRetainedCanonicalTarget(t *testing.T) {
 		t.Fatal("missing canonical evidence accepted")
 	}
 }
+
+// PublicHistory accepts a provider and a normal unbound Protocol RPC client,
+// just like Connect and the standalone discovery examples.
+func TestPublicHistoryBindsSuppliedCanonicalProvider(t *testing.T) {
+	ctx := context.Background()
+	s, calls := sharedEmptyFixture(t)
+	var err error
+	s.publicHistory, err = NewPublicHistory(PublicHistoryOptions{Protocol: s.protocol, Provider: s.options.Provider, ProtocolRPC: s.rpc.WithProvider(nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Refresh(ctx, RefreshOptions{PageSize: 3}); err != nil {
+		t.Fatal("refresh with constructor-supplied provider", err)
+	}
+	if calls.Load() == 0 {
+		t.Fatal("history did not read canonical updates")
+	}
+}
