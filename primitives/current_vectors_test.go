@@ -63,7 +63,7 @@ func currentJSON(t *testing.T, name string, v any) {
 }
 func TestCurrentKDFAndAddress(t *testing.T) {
 	var vectors struct {
-		Vectors []struct{ PrivateKey, SpendingPrivateKey, ViewingPrivateKey, DetectionKey string }
+		Vectors []struct{ PrivateKey, SpendingPrivateKey, ViewingPrivateKey, DetectionSeed, DetectionKey string }
 	}
 	currentJSON(t, "wallet-kdf-vectors.json", &vectors)
 	for _, v := range vectors.Vectors {
@@ -71,8 +71,8 @@ func TestCurrentKDFAndAddress(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		if hex.EncodeToString(w.SpendingPrivateKey) != v.SpendingPrivateKey || hex.EncodeToString(w.ViewingPrivateKey) != v.ViewingPrivateKey || hex.EncodeToString(w.DetectionKey) != v.DetectionKey {
-			t.Fatal("KDF differs from independent TS fixture")
+		if hex.EncodeToString(w.SpendingPrivateKey) != v.SpendingPrivateKey || hex.EncodeToString(w.ViewingPrivateKey) != v.ViewingPrivateKey || hex.EncodeToString(w.DetectionSeed) != v.DetectionSeed || hex.EncodeToString(w.DetectionKey) != v.DetectionKey {
+			t.Fatal("KDF differs from the independent receiving signature fixture")
 		}
 		a, e := EncodeLongAddress(ReceivingAddress{w.OwnerAddress, w.ViewingPublicKey, w.ClueKey})
 		if e != nil {

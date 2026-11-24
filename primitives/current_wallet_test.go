@@ -12,8 +12,8 @@ func TestEVMAccountKeyRestoresCurrentWallet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hex.EncodeToString(wallet.ViewingPrivateKey) != "80d9cd50805bf2ff5f95f9a091add4515bebb62293c721362fd077891c23069f" {
-		t.Fatal("viewing KDF differs from TS SDK")
+	if hex.EncodeToString(wallet.ViewingPrivateKey) != "57f1898fae64848970967e21804b8c1fc08559fea986b2f80644e1da35cbcc7b" {
+		t.Fatal("viewing KDF differs from the shared receiving signature vector")
 	}
 }
 

@@ -2,20 +2,16 @@ package primitives
 
 import (
 	"crypto/ecdsa"
-	"crypto/hkdf"
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math/big"
 
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
+	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	ethmath "github.com/ethereum/go-ethereum/common/math"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
-
-	"github.com/invisi-labs/invisi-sdk-go/primitives/internal/cryptography/fmd"
 )
 
 // InvisiWallet is a private key group. Never serialize it into payment requests,
@@ -62,68 +58,40 @@ type WalletAuthorizationRequest struct {
 	Words     []fr.Element
 }
 
-func walletScalar(key []byte, salt string, littleEndian bool) ([]byte, error) {
-	for counter := uint64(0); counter <= uint64(^uint32(0)); counter++ {
-		var info [4]byte
-		binary.BigEndian.PutUint32(info[:], uint32(counter))
-		candidate, e := hkdf.Key(sha256.New, key, []byte(salt), string(info[:]), 32)
-		if e != nil {
-			return nil, e
-		}
-		if littleEndian {
-			candidate[31] &= 7
-			if fmd.IsCanonicalDetectionKey(candidate) {
-				return candidate, nil
-			}
-			continue
-		}
-		n := new(big.Int).SetBytes(candidate)
-		if n.Sign() > 0 && n.Cmp(ethcrypto.S256().Params().N) < 0 {
-			return candidate, nil
-		}
-	}
-	return nil, fmt.Errorf("wallet scalar derivation exhausted")
-}
-
-// DeriveWallet restores the versioned Invisi key group from a 32-byte EVM account key.
+// DeriveWallet signs the receiving key message with a 32-byte EVM account key
+// and restores the Invisi key group with that same spending key.
 // Mnemonics and account derivation remain the application's responsibility.
 func DeriveWallet(privateKey []byte) (*InvisiWallet, error) {
-	spend := append([]byte(nil), privateKey...)
-	spendKey, err := ethcrypto.ToECDSA(spend)
+	spendKey, err := ethcrypto.ToECDSA(privateKey)
 	if err != nil {
 		return nil, fmt.Errorf("invalid EVM account private key: %w", err)
 	}
-	root, err := hkdf.Key(sha256.New, spend, []byte("Invisi.WalletRoot.v1"), "", 32)
+	defer clear(spendKey.D.Bits())
+	owner := ethcrypto.PubkeyToAddress(spendKey.PublicKey)
+	message, err := receivingKeyMessage(owner)
 	if err != nil {
 		return nil, err
 	}
-	defer clear(root)
-	view, err := walletScalar(root, "Invisi.WalletViewingKey.v1", false)
+	digest := [32]byte(accounts.TextHash(message))
+	signature, err := signReceivingDigest(digest, spendKey)
 	if err != nil {
 		return nil, err
 	}
-	seed, err := hkdf.Key(sha256.New, root, []byte("Invisi.WalletDetectionSeed.v1"), "", 32)
+	defer clear(signature)
+	receiving, seed, err := deriveReceivingKeys(owner, digest[:], signature)
 	if err != nil {
 		return nil, err
 	}
-	detection, err := walletScalar(seed, "Invisi.WalletDetectionKey.v1", true)
-	if err != nil {
-		return nil, err
-	}
-	clue, err := DeriveClueKey(detection)
-	if err != nil {
-		return nil, err
-	}
-	public := ethcrypto.FromECDSAPub(&spendKey.PublicKey)
-	identity, err := ComputeOwnerAddress(public)
-	if err != nil {
-		return nil, err
-	}
-	viewKey, err := ethcrypto.ToECDSA(view)
-	if err != nil {
-		return nil, err
-	}
-	return &InvisiWallet{SpendingPrivateKey: spend, SpendingPublicKey: public, ViewingPrivateKey: view, ViewingPublicKey: ethcrypto.CompressPubkey(&viewKey.PublicKey), DetectionSeed: seed, DetectionKey: detection, ClueKey: clue, OwnerAddress: identity}, nil
+	return &InvisiWallet{
+		SpendingPrivateKey: ethcrypto.FromECDSA(spendKey),
+		SpendingPublicKey:  ethcrypto.FromECDSAPub(&spendKey.PublicKey),
+		ViewingPrivateKey:  receiving.ViewingPrivateKey,
+		ViewingPublicKey:   receiving.ViewingPublicKey,
+		DetectionSeed:      seed,
+		DetectionKey:       receiving.DetectionKey,
+		ClueKey:            receiving.ClueKey,
+		OwnerAddress:       receiving.OwnerAddress,
+	}, nil
 }
 func walletPublicKey(input []byte) (*ecdsa.PublicKey, error) {
 	switch len(input) {
