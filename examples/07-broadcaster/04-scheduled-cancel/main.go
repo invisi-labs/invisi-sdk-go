@@ -36,6 +36,15 @@ func main() {
 	operationID := flag.String("operation-id", "", "recover and cancel this original encrypted operation instead of creating a payment")
 	recoverSubmitID := flag.Bool("recover-submit-id", false, "explicitly replay the frozen submission if its acknowledgement was lost")
 	flag.Parse()
+	operationIDProvided := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "operation-id" {
+			operationIDProvided = true
+		}
+	})
+	if (*recoverSubmitID || operationIDProvided) && *operationID == "" {
+		log.Fatal("recovery requires a nonempty --operation-id")
+	}
 	if !common.IsHexAddress(*tokenText) || *delay < time.Minute {
 		log.Fatal("configure --token and --delay of at least one minute")
 	}

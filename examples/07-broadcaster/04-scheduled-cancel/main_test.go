@@ -2,9 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/invisi-labs/invisi-sdk-go/rpc/broadcaster"
 	walletsession "github.com/invisi-labs/invisi-sdk-go/session"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -35,6 +39,31 @@ func TestSavedCancellationNeverCreatesSubmissionUnlessRecoveringUnknownAcknowled
 			}
 			if err == nil && (got != config || replay != test.wantReplay) {
 				t.Fatalf("saved capability changed: %v replay=%v", got, replay)
+			}
+		})
+	}
+}
+
+func TestRecoveryFlagsCannotFallThroughToNewScheduledPayment(t *testing.T) {
+	const child = "INVISI_TEST_SCHEDULED_RECOVERY_FLAGS"
+	if mode := os.Getenv(child); mode != "" {
+		os.Args = []string{"scheduled-cancel"}
+		if mode == "missing-id" {
+			os.Args = append(os.Args, "--recover-submit-id")
+		} else {
+			os.Args = append(os.Args, "--operation-id", "")
+		}
+		flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+		main()
+		return
+	}
+	for _, mode := range []string{"missing-id", "empty-id"} {
+		t.Run(mode, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestRecoveryFlagsCannotFallThroughToNewScheduledPayment$")
+			cmd.Env = append(os.Environ(), child+"="+mode)
+			output, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(output), "recovery requires a nonempty --operation-id") {
+				t.Fatalf("recovery flags entered creation/network path: error=%v output=%s", err, output)
 			}
 		})
 	}
