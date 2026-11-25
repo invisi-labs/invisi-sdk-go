@@ -161,7 +161,16 @@ func main() {
 		log.Print("Source accepted; no payment sent without --submit")
 		return
 	}
-	tx, err := managed.SendTransaction(ctx, ready)
+	call, err := ready.ExportTransaction(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// The host independently simulates the frozen call; the SDK retains its final send gate.
+	options, err := shared.SubmissionOptions(ctx, provider, publicWallet.OwnerAddress(), call)
+	if err != nil {
+		log.Fatal(err)
+	}
+	tx, err := managed.SendTransaction(ctx, ready, options)
 	if err != nil {
 		log.Fatal(err)
 	}

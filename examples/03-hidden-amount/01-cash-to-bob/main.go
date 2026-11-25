@@ -1,4 +1,4 @@
-// Alice funds a proved 10-unit transfer to Bob entirely from public tokens.
+// Alice funds two proved 5-unit Notes to Bob entirely from public tokens.
 package main
 
 import (
@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/invisi-labs/invisi-sdk-go/examples/shared"
 	"github.com/invisi-labs/invisi-sdk-go/prover/native"
 	"github.com/invisi-labs/invisi-sdk-go/sdk"
 )
@@ -50,7 +51,7 @@ func main() {
 	}
 	invisi := sdk.NewInvisi(sdk.InvisiOptions{Provider: provider, ProtocolRPC: client, Prover: backend})
 	token := common.HexToAddress(*tokenText)
-	output, err := sdk.NewNoteOutput(sdk.PaymentRequest{
+	outputs, err := shared.PublicFundingOutputs(sdk.PaymentRequest{
 		ChainID:         new(big.Int).SetUint64(pool.Context().ChainID),
 		ProtocolAddress: pool.Context().ProtocolAddress,
 		TokenAddress:    token,
@@ -68,7 +69,7 @@ func main() {
 		ExplicitFunds:       sdk.ExplicitFunds{Inputs: inputs, ChangeAddress: *address},
 		TransferPreparation: sdk.TransferPreparation{
 			TokenAddress: token,
-			Outputs:      []sdk.NoteOutput{output},
+			Outputs:      outputs,
 			Funding:      &sdk.FundingSource{Payer: publicWallet.OwnerAddress(), Amount: big.NewInt(10), Authorization: "caller"},
 		},
 	})

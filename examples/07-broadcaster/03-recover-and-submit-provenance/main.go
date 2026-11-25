@@ -198,7 +198,16 @@ func main() {
 			log.Print("Ready; no payment sent without --send. Retain this encrypted journal.")
 			return
 		}
-		tx, err := managed.SendTransaction(ctx, ready)
+		call, err := ready.ExportTransaction(ctx)
+		if err != nil {
+			log.Fatal(err)
+		}
+		// The host independently simulates the frozen call; the SDK retains its final send gate.
+		options, err := shared.SubmissionOptions(ctx, provider, publicWallet.OwnerAddress(), call)
+		if err != nil {
+			log.Fatal(err)
+		}
+		tx, err := managed.SendTransaction(ctx, ready, options)
 		if err != nil {
 			log.Fatal(err)
 		}

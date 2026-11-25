@@ -27,7 +27,6 @@ func main() {
 	protocolRPC := flag.String("protocol-rpc", "https://rpc.invisipay.fi/v1/chains/97", "Protocol RPC URL")
 	address := flag.String("wallet-address", "", "public long receiving address")
 	recipient := flag.String("recipient", "", "recipient public long receiving address")
-	operationID := flag.String("operation-id", "", "durable operation to resume")
 	tokenText := flag.String("token", "0x2222222222222222222222222222222222222222", "token contract")
 	flag.Parse()
 
@@ -100,7 +99,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	_ = operationID
 	output, err := sdk.NewNoteOutput(sdk.PaymentRequest{
 		ChainID:         new(big.Int).SetUint64(pool.Context().ChainID),
 		ProtocolAddress: pool.Context().ProtocolAddress,
@@ -117,6 +115,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	// Retain this ID and use 03-recover-operation for the same intent after interruption.
+	log.Printf("Operation: %s", prepared.ID())
 
 	// Authorize the frozen statement with an ordinary geth EIP-712 signature.
 	authorization, err := prepared.ExportWalletAuthorization(ctx)

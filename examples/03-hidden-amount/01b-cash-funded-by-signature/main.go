@@ -52,7 +52,7 @@ func main() {
 	}
 	invisi := sdk.NewInvisi(sdk.InvisiOptions{Provider: provider, ProtocolRPC: client, Prover: backend})
 	token := common.HexToAddress(*tokenText)
-	output, err := sdk.NewNoteOutput(sdk.PaymentRequest{
+	outputs, err := shared.PublicFundingOutputs(sdk.PaymentRequest{
 		ChainID:         new(big.Int).SetUint64(pool.Context().ChainID),
 		ProtocolAddress: pool.Context().ProtocolAddress,
 		TokenAddress:    token,
@@ -70,7 +70,7 @@ func main() {
 		ExplicitFunds:       sdk.ExplicitFunds{Inputs: inputs, ChangeAddress: *address},
 		TransferPreparation: sdk.TransferPreparation{
 			TokenAddress: token,
-			Outputs:      []sdk.NoteOutput{output},
+			Outputs:      outputs,
 			Funding:      &sdk.FundingSource{Payer: publicWallet.OwnerAddress(), Amount: big.NewInt(10), Authorization: "signature"},
 		},
 	})
