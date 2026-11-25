@@ -113,7 +113,7 @@ func main() {
 	}
 	status := saved.Status
 	if status == "confirmed" || status == "reverted" {
-		if err := shared.ValidateTerminalCreditRecovery(ctx, saved, managed.CreditReconciler("latest")); err != nil {
+		if err := shared.ValidateTerminalCreditRecovery(ctx, saved, managed.Scope(), provider); err != nil {
 			log.Fatal(err)
 		}
 		log.Printf("Original Credit operation is canonically %s", status)

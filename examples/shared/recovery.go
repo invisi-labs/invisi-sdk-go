@@ -10,6 +10,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/invisi-labs/invisi-sdk-go/primitives"
 	walletsession "github.com/invisi-labs/invisi-sdk-go/session"
 	creditsession "github.com/invisi-labs/invisi-sdk-go/session/credit"
 )
@@ -36,29 +37,16 @@ func RecoveryHash(text string, saved common.Hash) (common.Hash, error) {
 	return hash, nil
 }
 
-// ValidateTerminalCreditRecovery checks the original canonical outcome without resuming,
-// proving, exporting, or applying the grant transition a second time.
-func ValidateTerminalCreditRecovery(ctx context.Context, journal creditsession.Journal, reconciler creditsession.Reconciler) error {
-	if (journal.Status != "confirmed" && journal.Status != "reverted") || !journal.Externalized || len(journal.Calldata) == 0 || journal.TransactionHash == (common.Hash{}) || reconciler == nil {
+// ValidateTerminalCreditRecovery validates frozen terminal Credit evidence through
+// chain reads only. Managed Credit reconciliation can import output Notes.
+func ValidateTerminalCreditRecovery(ctx context.Context, journal creditsession.Journal, scope walletsession.WalletScope, chain RecoveryChain) error {
+	if (journal.Status != "confirmed" && journal.Status != "reverted") || !journal.Externalized || len(journal.Calldata) == 0 || journal.TransactionHash == (common.Hash{}) {
 		return fmt.Errorf("terminal Credit journal with frozen call and transaction hash required")
 	}
-	outcome, err := reconciler.Reconcile(ctx, journal.Intent, append([]byte(nil), journal.Calldata...), journal.TransactionHash)
-	if err != nil {
-		return err
+	if primitives.ElementToBigInt(journal.Intent.Context.ChainID).Cmp(new(big.Int).SetUint64(scope.ChainID)) != 0 || common.BigToAddress(primitives.ElementToBigInt(journal.Intent.Context.ProtocolAddress)) != scope.ProtocolAddress {
+		return fmt.Errorf("saved Credit intent deployment mismatch")
 	}
-	if outcome == nil {
-		return creditsession.ErrConfirmationPending
-	}
-	if outcome.TransactionHash != journal.TransactionHash || outcome.BlockHash == (common.Hash{}) || !bytes.Equal(outcome.Calldata, journal.Calldata) || outcome.Success != (journal.Status == "confirmed") {
-		return fmt.Errorf("canonical Credit receipt differs from terminal journal")
-	}
-	if outcome.Success && journal.Intent.Revoke != nil {
-		p := journal.Intent.Revoke
-		if outcome.RevokedOwner != p.Owner || outcome.RevokedToken != p.Token || outcome.RevokedGrantID == nil || outcome.RevokedGrantID.Cmp(p.GrantID) != 0 {
-			return fmt.Errorf("Credit revocation event namespace mismatch")
-		}
-	}
-	return nil
+	return validateTerminalCall(ctx, journal.Calldata, journal.TransactionHash, journal.Status == "confirmed", scope, chain)
 }
 
 type RecoveryChain interface {
@@ -78,6 +66,11 @@ func ValidateTerminalNoteRecovery(ctx context.Context, record walletsession.Oper
 	if record.ResolvedAt == nil || record.ResolvedAt.Hash == (common.Hash{}) {
 		return fmt.Errorf("confirmed Note journal resolution checkpoint required")
 	}
+	if err := validateTerminalCall(ctx, record.CallData, record.TransactionHash, true, scope, chain); err != nil {
+		return err
+	}
+	// Check the inventory observation last: a reorg at this later height can leave
+	// the earlier receipt canonical while invalidating the saved spent observation.
 	resolvedNumber := new(big.Int).SetUint64(record.ResolvedAt.Number)
 	resolvedHeader, err := chain.HeaderByNumber(ctx, resolvedNumber)
 	if err != nil {
@@ -86,26 +79,46 @@ func ValidateTerminalNoteRecovery(ctx context.Context, record walletsession.Oper
 	if resolvedHeader == nil || resolvedHeader.Number == nil || resolvedHeader.Number.Cmp(resolvedNumber) != 0 || resolvedHeader.Hash() != record.ResolvedAt.Hash {
 		return fmt.Errorf("saved Note resolution checkpoint is not canonical; refresh wallet recovery state")
 	}
-	receipt, err := chain.TransactionReceipt(ctx, record.TransactionHash)
+	return nil
+}
+
+// Only chain reads are permitted here. Managed Credit reconciliation also imports
+// Note outputs and therefore must not be used to validate an already terminal call.
+func validateTerminalCall(ctx context.Context, data []byte, hash common.Hash, success bool, scope walletsession.WalletScope, chain RecoveryChain) error {
+	receipt, err := chain.TransactionReceipt(ctx, hash)
 	if err != nil {
 		return err
 	}
-	if receipt == nil || receipt.TxHash != record.TransactionHash || receipt.BlockNumber == nil || !receipt.BlockNumber.IsUint64() || receipt.Status != types.ReceiptStatusSuccessful {
-		return fmt.Errorf("original payment is not canonically confirmed")
+	wantStatus := uint64(types.ReceiptStatusFailed)
+	if success {
+		wantStatus = types.ReceiptStatusSuccessful
 	}
-	header, err := chain.HeaderByNumber(ctx, receipt.BlockNumber)
+	if receipt == nil || receipt.TxHash != hash || receipt.BlockNumber == nil || !receipt.BlockNumber.IsUint64() || receipt.Status != wantStatus {
+		return fmt.Errorf("original payment receipt differs from saved terminal status")
+	}
+	// Keep both reads anchored to the original receipt even if a provider reuses objects.
+	blockNumber := new(big.Int).Set(receipt.BlockNumber)
+	blockHash := receipt.BlockHash
+	header, err := chain.HeaderByNumber(ctx, blockNumber)
 	if err != nil {
 		return err
 	}
-	if header == nil || header.Number == nil || header.Number.Cmp(receipt.BlockNumber) != 0 || header.Hash() != receipt.BlockHash {
+	if header == nil || header.Number == nil || header.Number.Cmp(blockNumber) != 0 || header.Hash() != blockHash {
 		return fmt.Errorf("original payment receipt is not canonical")
 	}
-	tx, pending, err := chain.TransactionByHash(ctx, record.TransactionHash)
+	tx, pending, err := chain.TransactionByHash(ctx, hash)
 	if err != nil {
 		return err
 	}
-	if tx == nil || pending || tx.Hash() != record.TransactionHash || tx.To() == nil || *tx.To() != scope.ProtocolAddress || tx.ChainId().Cmp(new(big.Int).SetUint64(scope.ChainID)) != 0 || tx.Value().Sign() != 0 || !bytes.Equal(tx.Data(), record.CallData) {
+	if tx == nil || pending || tx.Hash() != hash || tx.To() == nil || *tx.To() != scope.ProtocolAddress || tx.ChainId().Cmp(new(big.Int).SetUint64(scope.ChainID)) != 0 || tx.Value().Sign() != 0 || !bytes.Equal(tx.Data(), data) {
 		return fmt.Errorf("original payment differs from frozen call")
+	}
+	final, err := chain.HeaderByNumber(ctx, blockNumber)
+	if err != nil {
+		return err
+	}
+	if final == nil || final.Number == nil || final.Number.Cmp(blockNumber) != 0 || final.Hash() != blockHash {
+		return fmt.Errorf("original payment receipt changed during validation")
 	}
 	return nil
 }

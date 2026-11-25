@@ -16,7 +16,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/invisi-labs/invisi-sdk-go/examples/shared"
-	"github.com/invisi-labs/invisi-sdk-go/prover/native"
 	"github.com/invisi-labs/invisi-sdk-go/rpc/broadcaster"
 	"github.com/invisi-labs/invisi-sdk-go/sdk"
 	walletsession "github.com/invisi-labs/invisi-sdk-go/session"
@@ -75,21 +74,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	backend, err := native.NewNativeProver(native.NativeOptions{
-		BBBinary:   os.Getenv("BB_BINARY"),
-		NoirBinary: os.Getenv("NOIR_EXECUTOR"),
-	})
+	localCapabilities, err := scheduledCapabilities(*operationID, pool)
 	if err != nil {
 		log.Fatal(err)
 	}
-	source, err := shared.SourceCapability(pool)
-	if err != nil {
-		log.Fatal(err)
-	}
-	invisi := sdk.NewInvisi(sdk.InvisiOptions{
-		Provider: provider, ProtocolRPC: rpc,
-		Prover: backend, Provenance: source,
-	})
+	localCapabilities.Provider, localCapabilities.ProtocolRPC = provider, rpc
+	invisi := sdk.NewInvisi(localCapabilities)
 	database, err := sql.Open("sqlite", "examples/wallet.sqlite")
 	if err != nil {
 		log.Fatal(err)
@@ -127,7 +117,7 @@ func main() {
 		if !ok {
 			log.Fatal("unknown original scheduled operation")
 		}
-		cancelled, err := recoverAndCancel(ctx, managed, saved, *recoverSubmitID)
+		cancelled, err := recoverAndCancel(ctx, managed, saved, *recoverSubmitID, provider)
 		if err != nil {
 			log.Fatal(err)
 		}

@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	protocolrpc "github.com/invisi-labs/invisi-sdk-go/rpc"
 	"github.com/invisi-labs/invisi-sdk-go/rpc/broadcaster"
 	walletsession "github.com/invisi-labs/invisi-sdk-go/session"
+	"math/big"
 	"os"
 	"os/exec"
 	"strings"
@@ -66,5 +70,52 @@ func TestRecoveryFlagsCannotFallThroughToNewScheduledPayment(t *testing.T) {
 				t.Fatalf("recovery flags entered creation/network path: error=%v output=%s", err, output)
 			}
 		})
+	}
+}
+
+func TestSavedCancellationSetupSkipsSourceBootstrapAndProverAssets(t *testing.T) {
+	t.Setenv("PROVENANCE_ENDPOINT", "https://unavailable-source.invalid")
+	for _, name := range []string{"PROVENANCE_SIGNING_PUBLIC_KEY", "PROVENANCE_SIGNING_KEY_ID", "PROVENANCE_GENERATION", "PROVENANCE_PROVIDER_ID"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("BB_BINARY", "/unavailable/bb")
+	t.Setenv("NOIR_EXECUTOR", "/unavailable/noir")
+	t.Setenv("PROVENANCE_ASSET_ROOT", t.TempDir())
+	capabilities, err := scheduledCapabilities("original-operation", nil)
+	if err != nil {
+		t.Fatalf("saved cancellation opened Source/prover setup: %v", err)
+	}
+	if capabilities.Prover != nil || capabilities.Provenance != nil {
+		t.Fatal("saved cancellation must use only the durable capability")
+	}
+}
+
+type cancelledRecoveryChain struct{ header *types.Header }
+
+func (c *cancelledRecoveryChain) HeaderByNumber(context.Context, *big.Int) (*types.Header, error) {
+	return c.header, nil
+}
+func TestCompletedCancellationRechecksResolutionWithoutSessionOrRelay(t *testing.T) {
+	header := &types.Header{Number: big.NewInt(12)}
+	raw := []byte(`{"Broadcaster":{"Configuration":{},"Signed":{"Quote":{"Schedule":{"publishAfter":"2000000000"}}},"RequestID":"original-server-id","cancellationConfirmed":true}}`)
+	saved := walletsession.OperationRecord{ID: "original", Status: "cancelled", Plan: raw, Externalized: true, ResolvedAt: &protocolrpc.CanonicalBlock{Number: 12, Hash: header.Hash()}}
+	chain := &cancelledRecoveryChain{header: header}
+	before, err := json.Marshal(saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recoverAndCancel(context.Background(), nil, saved, false, chain); err != nil {
+		t.Fatal(err)
+	}
+	chain.header = &types.Header{Number: big.NewInt(12), Extra: []byte("orphaned observation")}
+	if _, err := recoverAndCancel(context.Background(), nil, saved, false, chain); err == nil {
+		t.Fatal("orphaned completed cancellation accepted")
+	}
+	after, err := json.Marshal(saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("terminal cancellation validation changed journal")
 	}
 }

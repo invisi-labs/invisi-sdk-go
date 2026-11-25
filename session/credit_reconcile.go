@@ -80,6 +80,7 @@ func (r creditReconciler) Reconcile(ctx context.Context, intent credit.Intent, d
 		return nil, errors.New("Credit receipt transaction differs from frozen calldata")
 	}
 	outcome := &creditsession.Outcome{TransactionHash: hash, Calldata: append([]byte(nil), data...), BlockHash: receipt.BlockHash, BlockNumber: receipt.BlockNumber.Uint64(), Success: receipt.Status == types.ReceiptStatusSuccessful}
+	var recoveredNotes []StoredNote
 	if outcome.Success {
 		anchor := boundary
 		notes, states, draws, err := s.readTransaction(ctx, hash, anchor, s.storedWalletResolver(ctx))
@@ -170,20 +171,7 @@ func (r creditReconciler) Reconcile(ctx context.Context, intent credit.Intent, d
 				return nil, errors.New("canonical Credit revocation event missing")
 			}
 		}
-		if len(notes) > 0 {
-			if err = s.options.Store.Update(ctx, s.scope, func(state *WalletState) error {
-				for _, note := range notes {
-					if old, ok := state.Notes[note.Commitment]; ok {
-						note.Spent = old.Spent
-						note.ReservedBy = old.ReservedBy
-					}
-					state.Notes[note.Commitment] = note
-				}
-				return nil
-			}); err != nil {
-				return nil, err
-			}
-		}
+		recoveredNotes = notes
 	}
 	final, err := s.options.Provider.HeaderByNumber(ctx, receipt.BlockNumber)
 	if err != nil {
@@ -191,6 +179,26 @@ func (r creditReconciler) Reconcile(ctx context.Context, intent credit.Intent, d
 	}
 	if final == nil || final.Hash() != receipt.BlockHash {
 		return nil, errors.New("Credit receipt changed during reconciliation")
+	}
+	// Recovered Note outputs remain staged until the existing final receipt
+	// fence succeeds. A failed canonical check must not change wallet inventory.
+	if len(recoveredNotes) > 0 {
+		if err = s.options.Store.Update(ctx, s.scope, func(state *WalletState) error {
+			if state.Invalidated {
+				return errors.New("wallet requires reset refresh")
+			}
+			for _, note := range recoveredNotes {
+				if old, ok := state.Notes[note.Commitment]; ok {
+					note.Spent = old.Spent
+					note.ReservedBy = old.ReservedBy
+					note.CheckedThrough = old.CheckedThrough
+				}
+				state.Notes[note.Commitment] = note
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
 	}
 	return outcome, nil
 }
