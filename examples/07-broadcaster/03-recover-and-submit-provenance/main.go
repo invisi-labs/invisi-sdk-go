@@ -40,6 +40,12 @@ func main() {
 	exportPath := flag.String("export-proof", "", "exclusive output path for the public proof JSON")
 	send := flag.Bool("send", false, "explicitly broadcast the initial main payment")
 	flag.Parse()
+	if !*resume && (*operationID != "" || *transactionHash != "") {
+		log.Fatal("original operation recovery requires --resume")
+	}
+	if _, err := shared.RecoveryHash(*transactionHash, common.Hash{}); err != nil {
+		log.Fatal(err)
+	}
 	if !*execute {
 		log.Print("Use --execute --send for phase one, then --execute --resume --operation-id ID; or --execute --proof FILE")
 		return
@@ -177,6 +183,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		log.Printf("Saved operation ID: %s", prepared.ID())
 		authorization, err := prepared.ExportWalletAuthorization(ctx)
 		if err != nil {
 			log.Fatal(err)
@@ -193,7 +200,6 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		log.Printf("Saved operation ID: %s", ready.ID())
 		if !*send {
 			log.Print("Ready; no payment sent without --send. Retain this encrypted journal.")
 			return
@@ -223,19 +229,40 @@ func main() {
 	if *operationID == "" {
 		log.Fatal("set the original --operation-id")
 	}
+	// Check the original association before replacing worker leases or touching Source evidence.
+	snapshot, err := store.ReadSnapshot(ctx, managed.Scope())
+	if err != nil {
+		log.Fatal(err)
+	}
+	saved, ok := snapshot.Operations[*operationID]
+	if !ok {
+		log.Fatal("unknown original operation")
+	}
+	hash, err := shared.RecoveryHash(*transactionHash, saved.TransactionHash)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if saved.Status == "confirmed" {
+		if err := shared.ValidateTerminalNoteRecovery(ctx, saved, managed.Scope(), provider); err != nil {
+			log.Fatal(err)
+		}
+	}
 	restored, err := managed.Resume(ctx, *operationID)
 	if err != nil {
 		log.Fatal(err)
 	}
-	if *transactionHash != "" {
-		restored, err = restored.TrackTransaction(ctx, common.HexToHash(*transactionHash))
+	if saved.Status != "confirmed" && saved.TransactionHash == (common.Hash{}) && hash != (common.Hash{}) {
+		restored, err = restored.TrackTransaction(ctx, hash)
 		if err != nil {
 			log.Fatal(err)
 		}
 	}
-	confirmed, err := restored.Reconcile(ctx)
-	if err != nil {
-		log.Fatal(err)
+	confirmed := restored
+	if saved.Status != "confirmed" {
+		confirmed, err = restored.Reconcile(ctx)
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 	if confirmed.Status() != "confirmed" {
 		log.Fatal("original payment is not canonically confirmed; resume it later")

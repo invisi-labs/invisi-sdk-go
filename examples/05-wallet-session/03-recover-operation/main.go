@@ -26,9 +26,13 @@ func main() {
 	protocolRPC := flag.String("protocol-rpc", "https://rpc.invisipay.fi/v1/chains/97", "Protocol RPC URL")
 	address := flag.String("wallet-address", "", "public long receiving address")
 	recipient := flag.String("recipient", "", "recipient public long receiving address")
+	txHash := flag.String("transaction-hash", "", "original external transaction hash to reconcile instead of exporting")
 	operationID := flag.String("operation-id", "", "durable operation to resume")
 	tokenText := flag.String("token", "0x2222222222222222222222222222222222222222", "token contract")
 	flag.Parse()
+	if _, err := shared.RecoveryHash(*txHash, common.Hash{}); err != nil {
+		log.Fatal(err)
+	}
 
 	publicWallet, err := sdk.WalletFromAddress(*address)
 	if err != nil {
@@ -89,16 +93,29 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Stage candidate discovery without changing the persisted inventory or checkpoints.
-	pending, err := managed.Refresh(ctx, walletsession.RefreshOptions{FromBlock: pool.Deployment().Protocol.FromBlock})
+	// Frozen journals contain the original selected inputs; recovery needs no discovery scan.
+	snapshot, err := store.ReadSnapshot(ctx, managed.Scope())
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	if _, err = pending.Decrypt(ctx, shared.AppDeliveryDecryptor{}); err != nil {
+	saved, ok := snapshot.Operations[*operationID]
+	if !ok {
+		log.Fatal("unknown operation")
+	}
+	hash, err := shared.RecoveryHash(*txHash, saved.TransactionHash)
+	if err != nil {
 		log.Fatal(err)
 	}
-
+	if saved.Status == "confirmed" {
+		if err := shared.ValidateTerminalNoteRecovery(ctx, saved, managed.Scope(), provider); err != nil {
+			log.Fatal(err)
+		}
+		log.Print("Original payment is canonically confirmed")
+		return
+	}
+	if saved.Status == "failed" || saved.Status == "expired" || saved.Status == "reverted" {
+		log.Fatalf("Original operation is terminal: %s", saved.Status)
+	}
 	_ = recipient
 	_ = token
 
@@ -106,6 +123,15 @@ func main() {
 	prepared, err := managed.Resume(ctx, *operationID)
 	if err != nil {
 		log.Fatal(err)
+	}
+	// An already exported or submitted call is reconciliation-only, including unknown hashes.
+	if saved.Externalized || hash != (common.Hash{}) || saved.Status == "submitted" || saved.Status == "uncertain" {
+		reconciled, err := prepared.Reconcile(ctx, walletsession.ReconcileOptions{TransactionHash: hash})
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("Original operation: %s", reconciled.Status())
+		return
 	}
 	if prepared.Status() == "prepared" || prepared.Status() == "authorized" {
 

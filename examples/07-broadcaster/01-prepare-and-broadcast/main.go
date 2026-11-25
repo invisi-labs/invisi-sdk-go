@@ -104,6 +104,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Printf("Saved operation ID: %s", prepared.ID())
 	operators, err := pool.GetBroadcasters(ctx, sdk.BroadcasterOptions{TokenAddress: token})
 	if err != nil {
 		log.Fatal(err)

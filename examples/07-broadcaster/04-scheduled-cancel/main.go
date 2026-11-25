@@ -33,6 +33,8 @@ func main() {
 	amountText := flag.String("amount", "10", "Note payment amount in token base units")
 	feeText := flag.String("max-fee", "1", "maximum Broadcaster fee in token base units")
 	delay := flag.Duration("delay", 10*time.Minute, "publication delay")
+	operationID := flag.String("operation-id", "", "recover and cancel this original encrypted operation instead of creating a payment")
+	recoverSubmitID := flag.Bool("recover-submit-id", false, "explicitly replay the frozen submission if its acknowledgement was lost")
 	flag.Parse()
 	if !common.IsHexAddress(*tokenText) || *delay < time.Minute {
 		log.Fatal("configure --token and --delay of at least one minute")
@@ -104,6 +106,22 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if *operationID != "" {
+		snapshot, err := store.ReadSnapshot(ctx, managed.Scope())
+		if err != nil {
+			log.Fatal(err)
+		}
+		saved, ok := snapshot.Operations[*operationID]
+		if !ok {
+			log.Fatal("unknown original scheduled operation")
+		}
+		cancelled, err := recoverAndCancel(ctx, managed, saved, *recoverSubmitID)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("Cancellation: id=%s state=%s; canonical input state reconciled", cancelled.ID, cancelled.State)
+		return
+	}
 	pending, err := managed.Refresh(ctx, walletsession.RefreshOptions{FromBlock: pool.Deployment().Protocol.FromBlock})
 	if err != nil {
 		log.Fatal(err)
@@ -163,6 +181,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Printf("Encrypted operation=%s; recover with --operation-id %s", prepared.ID(), prepared.ID())
 	err = relay.Quote(ctx, prepared, sdk.BroadcasterQuoteOptions{
 		MaxFeeAmount: maxFee,
 		Schedule: &sdk.ScheduleOptions{
@@ -201,7 +220,7 @@ func main() {
 	}
 	log.Printf("Verified scheduled quote: fee=%s publishAfter=%s executeBefore=%s", quote.Quote.FeeAmount, quote.Quote.Schedule.PublishAfter, quote.Quote.Schedule.ExecuteBefore)
 	log.Printf("Encrypted operation=%s", ready.ID())
-	operationID := ready.ID()
+	savedOperationID := ready.ID()
 	submitted, err := relay.Submit(ctx, ready)
 	if err != nil {
 		log.Fatal(err)
@@ -209,7 +228,7 @@ func main() {
 	log.Printf("Submission: id=%s state=%s", submitted.ID, submitted.State)
 
 	// Resume uses the local operation ID; remote status uses the ID returned by the Broadcaster.
-	recovered, err := managed.Resume(ctx, operationID)
+	recovered, err := managed.Resume(ctx, savedOperationID)
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -114,6 +114,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Printf("Saved Credit operation ID: %s", *operationID)
 
 	// Export the unsigned call while retaining the managed grant reservation for reconciliation.
 	call, err := operation.Calldata(ctx, publicWallet.OwnerAddress())

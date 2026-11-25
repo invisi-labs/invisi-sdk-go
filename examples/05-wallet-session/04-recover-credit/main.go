@@ -4,11 +4,9 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/hex"
 	"flag"
 	"log"
 	"os"
-	"strings"
 
 	"github.com/invisi-labs/invisi-sdk-go/examples/shared"
 
@@ -31,6 +29,9 @@ func main() {
 	operationID := flag.String("operation-id", "", "durable operation to resume")
 	txHash := flag.String("transaction-hash", "", "external transaction hash to reconcile instead of exporting")
 	flag.Parse()
+	if _, err := shared.RecoveryHash(*txHash, common.Hash{}); err != nil {
+		log.Fatal(err)
+	}
 
 	publicWallet, err := sdk.WalletFromAddress(*address)
 	if err != nil {
@@ -90,53 +91,52 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Stage candidate discovery without changing the persisted inventory or checkpoints.
-	pending, err := managed.Refresh(ctx, walletsession.RefreshOptions{FromBlock: pool.Deployment().Protocol.FromBlock})
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	if _, err = pending.Decrypt(ctx, shared.AppDeliveryDecryptor{}); err != nil {
-		log.Fatal(err)
-	}
-
-	// Credit has its own journal; managed.Resume restores Note operations instead.
+	// Recovery uses the encrypted frozen journal, without a fresh inventory scan.
 	creditSession, err := managed.Credit()
 	if err != nil {
 		log.Fatal(err)
 	}
-	history, err := creditSession.GetHistory(ctx)
+	snapshot, err := store.ReadSnapshot(ctx, managed.Scope())
 	if err != nil {
 		log.Fatal(err)
 	}
-	status := ""
-	externalized := false
-	for _, saved := range history.Operations {
-		if saved.ID == *operationID {
-			status, externalized = saved.Status, saved.Externalized
+	saved, ok := snapshot.PostpaidCredit.Operations[*operationID]
+	if !ok {
+		log.Fatal("unknown Credit operation")
+	}
+	hash, err := shared.RecoveryHash(*txHash, saved.TransactionHash)
+	if err != nil {
+		log.Fatal(err)
+	}
+	status := saved.Status
+	if status == "confirmed" || status == "reverted" {
+		if err := shared.ValidateTerminalCreditRecovery(ctx, saved, managed.CreditReconciler("latest")); err != nil {
+			log.Fatal(err)
 		}
+		log.Printf("Original Credit operation is canonically %s", status)
+		return
+	}
+	if status == "failed" {
+		log.Fatal("Original Credit operation is terminal: failed")
 	}
 	operation, err := creditSession.Resume(ctx, *operationID, backend)
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	// Canonical reconciliation releases reservations only after checking the exact call and receipt.
-	if *txHash != "" {
-		hashBytes, decodeErr := hex.DecodeString(strings.TrimPrefix(*txHash, "0x"))
-		if decodeErr != nil || len(hashBytes) != 32 {
-			log.Fatal("transaction-hash must be a 32-byte hex hash")
+	// Never sign or export a payment which already left this process.
+	if saved.Externalized || hash != (common.Hash{}) || status == "submitted" || status == "uncertain" {
+		if hash == (common.Hash{}) {
+			log.Fatal("operation already externalized; supply original transaction-hash for reconciliation")
 		}
-		if err = operation.Externalize(ctx, common.HexToHash(*txHash)); err != nil {
-			log.Fatal(err)
+		if saved.TransactionHash == (common.Hash{}) {
+			if err := operation.Externalize(ctx, hash); err != nil {
+				log.Fatal(err)
+			}
 		}
-		if err = operation.Reconcile(ctx, managed.CreditReconciler("latest")); err != nil {
+		if err := operation.Reconcile(ctx, managed.CreditReconciler("latest")); err != nil {
 			log.Fatal(err)
 		}
 		return
-	}
-	if externalized {
-		log.Fatal("operation already externalized; supply transaction-hash for reconciliation")
 	}
 
 	// Authorization witnesses are intentionally absent from storage, so unproved transitions need host approval again.

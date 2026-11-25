@@ -115,6 +115,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Printf("Saved operation ID: %s", prepared.ID())
 	estimate, err := prepared.EstimateGas()
 	if err != nil {
 		log.Fatal(err)

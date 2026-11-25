@@ -133,6 +133,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Printf("Saved Credit operation ID: %s", *operationID)
 
 	state, err := store.ReadSnapshot(ctx, managed.Scope())
 	if err != nil {

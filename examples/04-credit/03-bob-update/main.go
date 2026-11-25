@@ -129,6 +129,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Printf("Saved Credit operation ID: %s", *operationID)
 
 	// Export the owner/spender request only after the managed Credit session validates current chain state.
 	authorization, err := operation.ExportSigningRequest(ctx)
