@@ -8,12 +8,12 @@ Tagged releases validate the canonical version, every internal dependency pin, a
 
 Release jobs require `!cancelled()` as well as successful verification. Cancelling a workflow therefore also cancels publication work; completed registry writes remain immutable.
 
-The current release cohort is **v1.3.5**: root SDK plus primitives, protocol, prover, rpc, session, ipp, and paymentrouter. Every internal module requirement uses the same version; optional modules publish only after their SDK and protocol dependencies.
+The current release cohort is **v1.3.6**: root SDK plus primitives, protocol, prover, rpc, session, ipp, and paymentrouter. Every internal module requirement uses the same version; optional modules publish only after their SDK and protocol dependencies.
 
-## v1.3.5 publication
+## v1.3.6 publication
 
 Run `python3 scripts/test-modules.py`, `python3 scripts/check-packages.py`, and
-`python3 scripts/release-notes.py v1.3.5` before publication. Release notes are
+`python3 scripts/release-notes.py v1.3.6` before publication. Release notes are
 rendered from the matching `CHANGELOG.md` section. Keep fee-lock model identifiers
 and historical changelog sections at their original versions.
 
@@ -22,12 +22,12 @@ push CI at that exact commit. Create all eight tags on that same commit:
 
 ```sh
 for module in primitives protocol prover rpc session ipp paymentrouter; do
-  git tag "$module/v1.3.5" "$RELEASE_COMMIT"
+  git tag "$module/v1.3.6" "$RELEASE_COMMIT"
 done
-git tag v1.3.5 "$RELEASE_COMMIT"
+git tag v1.3.6 "$RELEASE_COMMIT"
 git push --atomic origin \
-  primitives/v1.3.5 protocol/v1.3.5 prover/v1.3.5 rpc/v1.3.5 \
-  session/v1.3.5 ipp/v1.3.5 paymentrouter/v1.3.5 v1.3.5
+  primitives/v1.3.6 protocol/v1.3.6 prover/v1.3.6 rpc/v1.3.6 \
+  session/v1.3.6 ipp/v1.3.6 paymentrouter/v1.3.6 v1.3.6
 ```
 
 GitHub does not emit tag push events when more than three tags are pushed in
@@ -37,7 +37,7 @@ workflow that GitHub will not start:
 
 ```sh
 gh workflow run recover-release.yml --ref main \
-  -f release_tag=v1.3.5 -f expected_sha="$RELEASE_COMMIT"
+  -f release_tag=v1.3.6 -f expected_sha="$RELEASE_COMMIT"
 ```
 
 The dispatcher runs from the selected trusted workflow revision, but checks out
@@ -50,5 +50,5 @@ rewritten or recreated. The ordinary single-root-tag workflow retains the same
 validation for push events that GitHub does emit.
 
 Wait for the dispatched release workflow to succeed, then resolve all eight
-modules at `v1.3.5` from a fresh consumer without local replacement directives
+modules at `v1.3.6` from a fresh consumer without local replacement directives
 before upgrading downstream applications.

@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.6
+
+Upgrade the complete eight-module cohort together: root SDK, primitives, protocol, prover, rpc, session, ipp and paymentrouter. Internal requirements and isolated module checks target `v1.3.6`; the private examples use the same cohort.
+
+### Durable payment and cancellation recovery
+
+- Persist the exact frozen broadcaster request and recovery checkpoint before submission. Resume ordinary, Credit and Provenance payments without silently creating another payment after an uncertain response.
+- Reject stale recovery checkpoints and incomplete scheduled-recovery flags. Scheduled cancellation reconciles canonical chain state and retains reservations while submission or cancellation remains uncertain.
+- Stage recovered Credit Note outputs until the final canonical receipt fence succeeds. Preserve existing `CheckedThrough`, `Spent` and `ReservedBy` fields, reject commits to invalidated wallet state, and retain reservations for terminal retries until independent canonical reconciliation permits release.
+
+### Official examples and release validation
+
+- Execute supported funding paths and recoverable direct submissions in the official examples. Expand restart, stale-checkpoint, scheduled cancellation and Credit recovery coverage.
+- Validate immutable multi-module tag coordinates and exact-commit CI before release recovery; render the complete matching changelog entry for publication.
+- Retain the v1.3.5 Core ABI, circuits, authenticated resource pins, receiving-key format and stored session schema. This patch requires no contract redeployment or database reset.
+
 ## 1.3.5
 
 Upgrade the complete eight-module cohort together: root SDK, primitives, protocol, prover, rpc, session, ipp and paymentrouter. Internal requirements and isolated module checks target `v1.3.5`.
