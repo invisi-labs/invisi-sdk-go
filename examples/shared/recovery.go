@@ -73,6 +73,19 @@ func ValidateTerminalNoteRecovery(ctx context.Context, record walletsession.Oper
 	if record.Status != "confirmed" || !record.Externalized || record.TransactionHash == (common.Hash{}) || len(record.CallData) == 0 {
 		return fmt.Errorf("confirmed Note journal with frozen call and hash required")
 	}
+	// ResolvedAt is the canonical inventory observation, which can be later than
+	// the payment receipt. Re-inclusion of the payment alone cannot repair it.
+	if record.ResolvedAt == nil || record.ResolvedAt.Hash == (common.Hash{}) {
+		return fmt.Errorf("confirmed Note journal resolution checkpoint required")
+	}
+	resolvedNumber := new(big.Int).SetUint64(record.ResolvedAt.Number)
+	resolvedHeader, err := chain.HeaderByNumber(ctx, resolvedNumber)
+	if err != nil {
+		return err
+	}
+	if resolvedHeader == nil || resolvedHeader.Number == nil || resolvedHeader.Number.Cmp(resolvedNumber) != 0 || resolvedHeader.Hash() != record.ResolvedAt.Hash {
+		return fmt.Errorf("saved Note resolution checkpoint is not canonical; refresh wallet recovery state")
+	}
 	receipt, err := chain.TransactionReceipt(ctx, record.TransactionHash)
 	if err != nil {
 		return err
@@ -93,6 +106,15 @@ func ValidateTerminalNoteRecovery(ctx context.Context, record walletsession.Oper
 	}
 	if tx == nil || pending || tx.Hash() != record.TransactionHash || tx.To() == nil || *tx.To() != scope.ProtocolAddress || tx.ChainId().Cmp(new(big.Int).SetUint64(scope.ChainID)) != 0 || tx.Value().Sign() != 0 || !bytes.Equal(tx.Data(), record.CallData) {
 		return fmt.Errorf("original payment differs from frozen call")
+	}
+	return nil
+}
+
+// ValidateRecoverySnapshot prevents receipt-only recovery from accepting inventory
+// that the managed session has already invalidated after a canonical fork change.
+func ValidateRecoverySnapshot(snapshot walletsession.WalletState) error {
+	if snapshot.Invalidated {
+		return fmt.Errorf("wallet requires reset refresh before recovery")
 	}
 	return nil
 }

@@ -100,6 +100,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if err := shared.ValidateRecoverySnapshot(snapshot); err != nil {
+		log.Fatal(err)
+	}
 	saved, ok := snapshot.PostpaidCredit.Operations[*operationID]
 	if !ok {
 		log.Fatal("unknown Credit operation")
